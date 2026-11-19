@@ -5,6 +5,7 @@ import path from 'path';
 import { Readable } from 'stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createFamilyApiHandler } from '../server/familyApiMiddleware';
+import vercelApiHandler from '../api/[...path]';
 import {
   advanceMonotonicAngle,
   computeForwardLapTarget,
@@ -535,5 +536,121 @@ describe('Fase 1 — Estabilização: Segurança HTTP, Rate Limits, Pareamento e
       }
     });
     expect(claimFreedUsername.status).toBe(200);
+  });
+
+  it('roteia /api/* no handler serverless da Vercel e suporta fallback via cookie entre instâncias', async () => {
+    const runMock = (
+      fn: (req: http.IncomingMessage, res: http.ServerResponse, next: () => void) => Promise<void> | void,
+      url: string,
+      method: string,
+      bodyObj?: any,
+      extraHeaders: Record<string, string> = {}
+    ): Promise<{ status: number; data: any; headers: Record<string, string> }> =>
+      new Promise((resolve) => {
+        const req = Object.assign(Readable.from([]), {
+          url,
+          method,
+          headers: extraHeaders,
+          body: bodyObj,
+          socket: { remoteAddress: '127.0.0.1' }
+        }) as unknown as http.IncomingMessage;
+        const headers: Record<string, string> = {};
+        let statusCode = 200;
+        const chunks: string[] = [];
+        const res = {
+          get statusCode() {
+            return statusCode;
+          },
+          set statusCode(val: number) {
+            statusCode = val;
+          },
+          setHeader(k: string, v: string) {
+            headers[k.toLowerCase()] = String(v);
+          },
+          end(chunk?: any) {
+            if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+            resolve({ status: statusCode, data: JSON.parse(chunks.join('') || '{}'), headers });
+          }
+        } as unknown as http.ServerResponse;
+        Promise.resolve(fn(req, res, () => {})).catch(() => {});
+      });
+
+    const healthDirect = await runMock((req, res) => vercelApiHandler(req, res), '/api/health', 'GET');
+    expect(healthDirect.status).toBe(200);
+    expect(healthDirect.data.ok).toBe(true);
+
+    const healthRewritten = await runMock(
+      (req, res) => vercelApiHandler(req, res),
+      '/api/[...path]?path=health',
+      'GET'
+    );
+    expect(healthRewritten.status).toBe(200);
+    expect(healthRewritten.data.ok).toBe(true);
+
+    const parsedBodyValidation = await runMock(
+      (req, res) => vercelApiHandler(req, res),
+      '/api/auth/request-email-verification',
+      'POST',
+      { email: 'invalido' }
+    );
+    expect(parsedBodyValidation.status).toBe(400);
+    expect(parsedBodyValidation.data.code).toBe('INVALID_EMAIL');
+
+    // Simula duas instâncias serverless sem armazenamento compartilhado (Container A -> Container B)
+    const dirA = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-serverless-a-'));
+    const dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-serverless-b-'));
+    try {
+      let sentCode = '';
+      const sharedSmtp = () => ({
+        SMTP_HOST: 'smtp.gmail.com',
+        SMTP_PORT: 587,
+        SMTP_SECURE: false,
+        EMAIL_USER: 'serverless@gmail.com',
+        EMAIL_PASS: 'serverless-secret-test',
+        EMAIL_FROM: 'Ajuda KIDS <serverless@gmail.com>'
+      });
+      const handlerA = createFamilyApiHandler({
+        rootDir: process.cwd(),
+        dataDir: dirA,
+        getSmtpEnv: sharedSmtp,
+        sendMailOverride: async (mail) => {
+          sentCode = mail.html.match(/>\s*(\d{6})\s*</)?.[1] || '';
+          return { accepted: [mail.to], messageId: '<serverless-1@test>' };
+        }
+      });
+      const handlerB = createFamilyApiHandler({
+        rootDir: process.cwd(),
+        dataDir: dirB,
+        getSmtpEnv: sharedSmtp
+      });
+
+      const reqOtp = await runMock(handlerA, '/api/auth/request-email-verification', 'POST', {
+        parentName: 'Mãe Cloud',
+        username: 'mae.cloud',
+        email: 'mae_cloud@gmail.com',
+        password: 'Password@99',
+        passwordHash: 'h_cloud',
+        passwordSalt: 's_cloud',
+        settings: {}
+      });
+      expect(reqOtp.status).toBe(200);
+      expect(sentCode).toMatch(/^\d{6}$/);
+      expect(reqOtp.headers['set-cookie']).toContain('ak_reg_verify=');
+
+      const cookiePair = reqOtp.headers['set-cookie'].split(';')[0];
+      const confirmOnB = await runMock(
+        handlerB,
+        '/api/auth/confirm-email-verification',
+        'POST',
+        { email: 'mae_cloud@gmail.com', code: sentCode },
+        { cookie: cookiePair }
+      );
+      expect(confirmOnB.status).toBe(200);
+      expect(confirmOnB.data.ok).toBe(true);
+      expect(confirmOnB.data.session?.parentEmail).toBe('mae_cloud@gmail.com');
+    } finally {
+      fs.rmSync(dirA, { recursive: true, force: true });
+      fs.rmSync(dirB, { recursive: true, force: true });
+    }
   });
 });

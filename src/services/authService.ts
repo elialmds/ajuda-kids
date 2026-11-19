@@ -286,7 +286,7 @@ class AuthService {
             settings
           })
         });
-        const data = await resp.json();
+        const data = await resp.json().catch(() => null);
         if (!resp.ok) {
           return {
             success: false,
@@ -295,9 +295,15 @@ class AuthService {
                 ? String(data?.error || '').toLowerCase().includes('usuário')
                   ? 'DUPLICATE_USERNAME'
                   : 'DUPLICATE_EMAIL'
-                : data?.code || 'VALIDATION_ERROR',
+                : data?.code || (resp.status >= 500 ? 'EMAIL_SEND_FAILED' : 'VALIDATION_ERROR'),
             retryAfterSeconds: data?.retryAfterSeconds,
-            error: data?.error || 'Não foi possível enviar o código de verificação.'
+            error:
+              data?.error ||
+              (resp.status === 404
+                ? 'Serviço de autenticação (/api) indisponível neste servidor.'
+                : resp.status >= 500
+                ? 'Erro interno no servidor ao solicitar o código de verificação.'
+                : 'Não foi possível enviar o código de verificação.')
           };
         }
         return {
@@ -424,13 +430,17 @@ class AuthService {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: cleanEmail, code: cleanCode })
         });
-        const data = await resp.json();
+        const data = await resp.json().catch(() => null);
         if (!resp.ok) {
           return {
             success: false,
             code: data?.code || 'INVALID_CODE',
             remainingAttempts: data?.remainingAttempts,
-            error: data?.error || 'Não foi possível validar o código de verificação.'
+            error:
+              data?.error ||
+              (resp.status >= 500
+                ? 'Erro interno no servidor ao validar o código de verificação.'
+                : 'Não foi possível validar o código de verificação.')
           };
         }
 
@@ -640,8 +650,11 @@ class AuthService {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ identifier: cleanId })
         });
-        const challengeData = await challengeResp.json();
+        const challengeData = await challengeResp.json().catch(() => null);
         if (!challengeResp.ok) {
+          if (challengeResp.status === 404 && !challengeData?.error) {
+            return { success: false, error: 'Serviço de login (/api) indisponível neste servidor.' };
+          }
           return { success: false, error: challengeData?.error || 'Conta não encontrada.' };
         }
 
@@ -657,13 +670,17 @@ class AuthService {
             password: input.password
           })
         });
-        const loginData = await loginResp.json();
+        const loginData = await loginResp.json().catch(() => null);
         if (!loginResp.ok) {
           return {
             success: false,
             code: loginData?.code,
             email: loginData?.email,
-            error: loginData?.error || 'E-mail/usuário ou senha incorretos.'
+            error:
+              loginData?.error ||
+              (loginResp.status >= 500
+                ? 'Erro interno no servidor ao autenticar.'
+                : 'E-mail/usuário ou senha incorretos.')
           };
         }
 

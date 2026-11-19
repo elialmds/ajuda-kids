@@ -1,7 +1,8 @@
-import { loadEnv, Plugin } from 'vite';
+import type { Plugin } from 'vite';
 import nodemailer from 'nodemailer';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 import type { IncomingMessage, ServerResponse } from 'http';
 
@@ -172,13 +173,120 @@ function isOriginAllowed(origin: string, host: string): boolean {
   }
 }
 
+const KV_STORE_KEY = 'ajuda_kids_family_cloud_db_v1';
+
+function readLocalEnvFiles(rootDir: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const candidates = ['.env', '.env.local'];
+  for (const filename of candidates) {
+    const filePath = path.join(rootDir, filename);
+    try {
+      if (!fs.existsSync(filePath)) continue;
+      const content = fs.readFileSync(filePath, 'utf-8');
+      for (const rawLine of content.split(/\r?\n/)) {
+        const trimmed = rawLine.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx <= 0) continue;
+        const key = trimmed.slice(0, eqIdx).trim();
+        let val = trimmed.slice(eqIdx + 1).trim();
+        if (
+          (val.startsWith('"') && val.endsWith('"') && val.length >= 2) ||
+          (val.startsWith("'") && val.endsWith("'") && val.length >= 2)
+        ) {
+          val = val.slice(1, -1);
+        }
+        result[key] = val;
+      }
+    } catch {
+      // Ignore unreadable local env files
+    }
+  }
+  return result;
+}
+
+function getExternalKvConfig(): { url: string; token: string } | null {
+  const url = String(
+    process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || ''
+  )
+    .trim()
+    .replace(/\/+$/, '');
+  const token = String(
+    process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || ''
+  ).trim();
+  if (!url || !token) return null;
+  return { url, token };
+}
+
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  for (const part of String(cookieHeader).split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    if (k) out[k] = v;
+  }
+  return out;
+}
+
+function signSignedPayload(payload: any, secret: string): string {
+  const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(encoded, 'utf8').digest('base64url');
+  return `${encoded}.${sig}`;
+}
+
+function verifySignedPayload(token: string, secret: string): any | null {
+  if (!token || !token.includes('.')) return null;
+  const [encoded, sig] = token.split('.');
+  if (!encoded || !sig) return null;
+  const expected = crypto.createHmac('sha256', secret).update(encoded, 'utf8').digest('base64url');
+  if (!hashesEqual(sig, expected)) return null;
+  try {
+    return JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function isHttpsRequest(req: IncomingMessage): boolean {
+  const xfProto = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  if (xfProto.includes('https')) return true;
+  const origin = String(req.headers['origin'] || '').toLowerCase();
+  return origin.startsWith('https://');
+}
+
+function normalizeStoreData(parsed: any): ServerStore {
+  return {
+    users: parsed?.users || {},
+    sessions: parsed?.sessions || {},
+    deviceTokens: parsed?.deviceTokens || {},
+    families: parsed?.families || {},
+    pairings: parsed?.pairings || {},
+    passwordResets: parsed?.passwordResets || {},
+    passwordResetRateLimits: parsed?.passwordResetRateLimits || {},
+    loginAttempts: parsed?.loginAttempts || {},
+    emailVerifications: parsed?.emailVerifications || {},
+    gameRooms: parsed?.gameRooms || {}
+  };
+}
+
 export function createFamilyApiHandler(options: FamilyApiOptions) {
-  const dataDir = options.dataDir || path.resolve(options.rootDir, '.data');
+  const isServerlessRuntime = Boolean(
+    process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME
+  );
+  const useWarmServerlessCache = !options.dataDir && isServerlessRuntime;
+  const dataDir =
+    options.dataDir ||
+    (isServerlessRuntime
+      ? path.join(os.tmpdir(), 'ajuda-kids-data')
+      : path.resolve(options.rootDir, '.data'));
   const dbFile = path.join(dataDir, 'family_cloud_db.json');
 
   const getSmtpEnvConfig = (): SmtpEnvConfig => {
     if (options.getSmtpEnv) return options.getSmtpEnv();
-    const fileEnv = loadEnv(process.env.NODE_ENV || 'development', options.rootDir, '');
+    const fileEnv = readLocalEnvFiles(options.rootDir);
     const emailUser = (process.env.EMAIL_USER || fileEnv.EMAIL_USER || '').trim();
     const rawSecure = String(process.env.SMTP_SECURE ?? fileEnv.SMTP_SECURE ?? 'false')
       .trim()
@@ -271,7 +379,9 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
     const fromAddress = env.EMAIL_FROM || (env.EMAIL_USER ? `Ajuda KIDS <${env.EMAIL_USER}>` : '');
 
     if (!env.SMTP_HOST || !env.SMTP_PORT || !env.EMAIL_USER || !env.EMAIL_PASS || !fromAddress) {
-      const msg = 'Credenciais Gmail SMTP incompletas no arquivo .env do servidor.';
+      const msg = isServerlessRuntime
+        ? 'Credenciais Gmail SMTP não configuradas no servidor Vercel. Adicione EMAIL_USER e EMAIL_PASS em Settings > Environment Variables e faça Redeploy.'
+        : 'Credenciais Gmail SMTP incompletas no arquivo .env do servidor.';
       logSmtpEvent({
         purpose,
         to: toEmail,
@@ -406,48 +516,71 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
     }
   };
 
-  const loadStore = (): ServerStore => {
+  const getStatelessCookieSecret = (): string => {
+    const smtp = getSmtpEnvConfig();
+    return (process.env.AUTH_COOKIE_SECRET || smtp.EMAIL_PASS || 'ajuda-kids-serverless-otp-key').trim();
+  };
+
+  const loadStore = async (): Promise<ServerStore> => {
+    const kv = !options.dataDir ? getExternalKvConfig() : null;
+    if (kv && typeof fetch !== 'undefined') {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      try {
+        const resp = await fetch(`${kv.url}/get/${encodeURIComponent(KV_STORE_KEY)}`, {
+          headers: { Authorization: `Bearer ${kv.token}` },
+          signal: controller.signal
+        });
+        if (resp.ok) {
+          const payload: any = await resp.json();
+          if (payload && typeof payload.result === 'string' && payload.result.trim()) {
+            const parsed = normalizeStoreData(JSON.parse(payload.result));
+            if (useWarmServerlessCache) {
+              (globalThis as any).__ajudaKidsWarmStore = parsed;
+            }
+            return parsed;
+          }
+          if (payload && payload.result === null) {
+            return normalizeStoreData({});
+          }
+        }
+      } catch (e) {
+        console.warn('KV store read fallback to disk/memory:', e);
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    if (useWarmServerlessCache && (globalThis as any).__ajudaKidsWarmStore) {
+      return normalizeStoreData((globalThis as any).__ajudaKidsWarmStore);
+    }
+
     try {
       if (fs.existsSync(dbFile)) {
         const raw = fs.readFileSync(dbFile, 'utf-8');
-        const parsed = JSON.parse(raw);
-        return {
-          users: parsed.users || {},
-          sessions: parsed.sessions || {},
-          deviceTokens: parsed.deviceTokens || {},
-          families: parsed.families || {},
-          pairings: parsed.pairings || {},
-          passwordResets: parsed.passwordResets || {},
-          passwordResetRateLimits: parsed.passwordResetRateLimits || {},
-          loginAttempts: parsed.loginAttempts || {},
-          emailVerifications: parsed.emailVerifications || {},
-          gameRooms: parsed.gameRooms || {}
-        };
+        const parsed = normalizeStoreData(JSON.parse(raw));
+        if (useWarmServerlessCache) {
+          (globalThis as any).__ajudaKidsWarmStore = parsed;
+        }
+        return parsed;
       }
     } catch (e) {
       console.error('Error reading family sync store:', e);
     }
-    return {
-      users: {},
-      sessions: {},
-      deviceTokens: {},
-      families: {},
-      pairings: {},
-      passwordResets: {},
-      passwordResetRateLimits: {},
-      loginAttempts: {},
-      emailVerifications: {},
-      gameRooms: {}
-    };
+    return normalizeStoreData({});
   };
 
-  const saveStore = (store: ServerStore) => {
+  const saveStore = async (store: ServerStore): Promise<void> => {
+    if (useWarmServerlessCache) {
+      (globalThis as any).__ajudaKidsWarmStore = store;
+    }
+
+    const serialized = JSON.stringify(store, null, 2);
     const tmpFile = `${dbFile}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
     try {
       if (!fs.existsSync(dataDir)) {
         fs.mkdirSync(dataDir, { recursive: true });
       }
-      const serialized = JSON.stringify(store, null, 2);
       fs.writeFileSync(tmpFile, serialized, 'utf-8');
       fs.renameSync(tmpFile, dbFile);
     } catch (e) {
@@ -458,9 +591,51 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       }
       console.error('Error saving family sync store:', e);
     }
+
+    const kv = !options.dataDir ? getExternalKvConfig() : null;
+    if (kv && typeof fetch !== 'undefined') {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      try {
+        await fetch(kv.url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${kv.token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(['SET', KV_STORE_KEY, JSON.stringify(store)]),
+          signal: controller.signal
+        });
+      } catch (e) {
+        console.error('Error saving family sync store to KV:', e);
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
   };
 
   const parseBody = (req: IncomingMessage): Promise<any> => {
+    const preParsed = (req as any).body;
+    if (preParsed !== undefined) {
+      if (typeof preParsed === 'string') {
+        try {
+          return Promise.resolve(preParsed ? JSON.parse(preParsed) : {});
+        } catch {
+          return Promise.resolve({});
+        }
+      }
+      if (Buffer.isBuffer(preParsed)) {
+        try {
+          const text = preParsed.toString('utf-8');
+          return Promise.resolve(text ? JSON.parse(text) : {});
+        } catch {
+          return Promise.resolve({});
+        }
+      }
+      if (typeof preParsed === 'object' && preParsed !== null) {
+        return Promise.resolve(preParsed);
+      }
+    }
     return new Promise((resolve) => {
       let body = '';
       req.on('data', chunk => {
@@ -711,7 +886,18 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       return sendJson(req, res, 200, { ok: true });
     }
 
-    const store = loadStore();
+    if (url.startsWith('/api/health') && req.method === 'GET') {
+      const smtpEnv = getSmtpEnvConfig();
+      const kv = !options.dataDir ? getExternalKvConfig() : null;
+      return sendJson(req, res, 200, {
+        ok: true,
+        runtime: isServerlessRuntime ? 'vercel-serverless' : 'node-local',
+        smtpConfigured: Boolean(smtpEnv.EMAIL_USER && smtpEnv.EMAIL_PASS),
+        persistentKvConfigured: Boolean(kv)
+      });
+    }
+
+    const store = await loadStore();
 
     const createVerifiedAccountAndSession = (pending: {
       parentName: string;
@@ -952,7 +1138,14 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
           settings
         }
       };
-      saveStore(store);
+      await saveStore(store);
+
+      const statelessToken = signSignedPayload(verifications[emailLower], getStatelessCookieSecret());
+      const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
+      res.setHeader(
+        'Set-Cookie',
+        `ak_reg_verify=${statelessToken}; Path=/api; Max-Age=600; HttpOnly; SameSite=Lax${secureFlag}`
+      );
 
       return sendJson(req, res, 200, {
         ok: true,
@@ -982,7 +1175,19 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       }
 
       const verifications = (store.emailVerifications = store.emailVerifications || {});
-      const record = verifications[emailLower];
+      let record = verifications[emailLower];
+      let fromCookieFallback = false;
+      if (!record) {
+        const cookies = parseCookies(req.headers.cookie);
+        if (cookies.ak_reg_verify) {
+          const decoded = verifySignedPayload(cookies.ak_reg_verify, getStatelessCookieSecret());
+          if (decoded && decoded.emailLower === emailLower && decoded.pendingRegistration) {
+            record = decoded;
+            verifications[emailLower] = decoded;
+            fromCookieFallback = true;
+          }
+        }
+      }
       if (!record || record.used || !record.pendingRegistration) {
         return sendJson(req, res, 400, {
           ok: false,
@@ -999,10 +1204,16 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         });
       }
 
+      const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
+      const clearVerifyCookie = () => {
+        res.setHeader('Set-Cookie', `ak_reg_verify=; Path=/api; Max-Age=0; HttpOnly; SameSite=Lax${secureFlag}`);
+      };
+
       const maxAttempts = Number(record.maxAttempts || 5);
       if (Number(record.attempts || 0) >= maxAttempts) {
         record.used = true;
-        saveStore(store);
+        await saveStore(store);
+        clearVerifyCookie();
         return sendJson(req, res, 429, {
           ok: false,
           code: 'TOO_MANY_ATTEMPTS',
@@ -1016,8 +1227,15 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         const remainingAttempts = Math.max(0, maxAttempts - record.attempts);
         if (remainingAttempts <= 0) {
           record.used = true;
+          clearVerifyCookie();
+        } else if (fromCookieFallback || isServerlessRuntime) {
+          const updatedToken = signSignedPayload(record, getStatelessCookieSecret());
+          res.setHeader(
+            'Set-Cookie',
+            `ak_reg_verify=${updatedToken}; Path=/api; Max-Age=600; HttpOnly; SameSite=Lax${secureFlag}`
+          );
         }
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, remainingAttempts <= 0 ? 429 : 400, {
           ok: false,
           code: remainingAttempts <= 0 ? 'TOO_MANY_ATTEMPTS' : 'INVALID_CODE',
@@ -1033,7 +1251,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       const existingEmailUser = Object.values(store.users).find((u: any) => u.emailLower === emailLower);
       if (existingEmailUser && existingEmailUser.emailVerified === true) {
         record.used = true;
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 409, {
           ok: false,
           code: 'DUPLICATE_EMAIL',
@@ -1116,7 +1334,8 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         family = created.family;
       }
 
-      saveStore(store);
+      await saveStore(store);
+      clearVerifyCookie();
 
       return sendJson(req, res, 200, {
         ok: true,
@@ -1180,7 +1399,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         passwordSalt,
         settings
       });
-      saveStore(store);
+      await saveStore(store);
 
       return sendJson(req, res, 200, { ok: true, session, family });
     }
@@ -1216,7 +1435,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         });
       }
 
-      const recordFailedLogin = () => {
+      const recordFailedLogin = async () => {
         const prev = attemptsMap[attemptKey];
         const withinWindow = prev && now - prev.windowStart < WINDOW_MS;
         const failedCount = withinWindow ? prev.failedCount + 1 : 1;
@@ -1226,7 +1445,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
           windowStart: withinWindow ? prev.windowStart : now,
           lockUntil
         };
-        saveStore(store);
+        await saveStore(store);
         if (lockUntil > now) {
           return sendJson(req, res, 429, {
             ok: false,
@@ -1240,7 +1459,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
 
       const user = findUserByIdentifier(store.users, identifier);
       if (!user) {
-        return recordFailedLogin();
+        return await recordFailedLogin();
       }
 
       let validCredentials = false;
@@ -1268,7 +1487,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       }
 
       if (!validCredentials) {
-        return recordFailedLogin();
+        return await recordFailedLogin();
       }
 
       if (user.emailVerified === false) {
@@ -1301,7 +1520,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
       };
       store.sessions[token] = session;
-      saveStore(store);
+      await saveStore(store);
 
       return sendJson(req, res, 200, {
         ok: true,
@@ -1317,14 +1536,14 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       if (!session || Date.now() > Number(session.expiresAt || 0)) {
         if (token && store.sessions[token]) {
           delete store.sessions[token];
-          saveStore(store);
+          await saveStore(store);
         }
         return sendJson(req, res, 401, { error: 'Sessão inválida ou expirada.' });
       }
       const user = store.users[session.userId];
       if (user && user.emailVerified === false) {
         delete store.sessions[token];
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 403, {
           ok: false,
           code: 'EMAIL_NOT_VERIFIED',
@@ -1337,7 +1556,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         const reconciled = reconcileFamiliesForUser(store, user);
         family = reconciled.family;
         if (reconciled.changed) {
-          saveStore(store);
+          await saveStore(store);
         }
       }
       return sendJson(req, res, 200, { ok: true, session, family });
@@ -1348,7 +1567,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       const token = extractBearerToken(req) || String(body.token || '').trim();
       if (token && store.sessions[token]) {
         delete store.sessions[token];
-        saveStore(store);
+        await saveStore(store);
       }
       return sendJson(req, res, 200, { ok: true });
     }
@@ -1427,7 +1646,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         emailId = emailDispatch.emailId;
       }
 
-      saveStore(store);
+      await saveStore(store);
 
       return sendJson(req, res, 200, {
         ok: true,
@@ -1487,7 +1706,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         if (resetRecord.attempts >= 5) {
           resetRecord.used = true;
         }
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 400, {
           ok: false,
           code: 'INVALID_LINK_OR_CODE',
@@ -1543,7 +1762,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         family.securityAuditLog = list.slice(0, 100);
       }
 
-      saveStore(store);
+      await saveStore(store);
       return sendJson(req, res, 200, {
         ok: true,
         code: 'PASSWORD_CHANGED',
@@ -1609,7 +1828,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         }
         family.pinLockout = { failedAttempts: 0, lockUntil: 0, lockoutTier: 0 };
         addAudit('PIN_SUCCESS', 'PIN parental validado via servidor.');
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 200, {
           ok: true,
           valid: true,
@@ -1630,7 +1849,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
           lockoutTier: nextTier
         };
         addAudit('PIN_LOCKOUT', `Bloqueio de ${lockSec}s após ${nextAttempts} tentativas incorretas.`);
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 429, {
           ok: false,
           valid: false,
@@ -1646,7 +1865,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         lockoutTier: Number(lockout.lockoutTier) || 0
       };
       addAudit('PIN_FAILED', `Tentativa incorreta de PIN (${nextAttempts}ª falha).`);
-      saveStore(store);
+      await saveStore(store);
       return sendJson(req, res, 401, {
         ok: false,
         valid: false,
@@ -1681,7 +1900,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         Boolean(legacyPasswordHash && user.passwordHash === legacyPasswordHash);
       if (!passwordMatches) {
         recordServerAudit('PIN_RECOVERY_FAILED', 'Tentativa de recuperação de PIN com senha parental incorreta.');
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 401, { error: 'Senha da conta parental incorreta.' });
       }
 
@@ -1705,7 +1924,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         store.families[user.familyId] = family;
       }
 
-      saveStore(store);
+      await saveStore(store);
       return sendJson(req, res, 200, {
         ok: true,
         message: 'PIN redefinido com sucesso!',
@@ -1806,7 +2025,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         updatedAt: Date.now()
       };
 
-      saveStore(store);
+      await saveStore(store);
       return sendJson(req, res, 200, { ok: true, family: store.families[familyId] });
     }
 
@@ -1851,7 +2070,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         family.drawings = currentDrawings.filter((d: any) => d.id !== drawingId);
         family.deletedDrawingIds = Array.from(new Set([...deletedIds, drawingId])).slice(-200);
         family.updatedAt = Date.now();
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 200, { ok: true, drawings: family.drawings });
       }
 
@@ -1859,7 +2078,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         family.drawings = mergeById(currentDrawings, [drawing], 120);
         family.deletedDrawingIds = deletedIds.filter((id: string) => id !== drawing.id);
         family.updatedAt = Date.now();
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 200, { ok: true, drawing, drawings: family.drawings });
       }
 
@@ -1902,7 +2121,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
           updatedAt: Date.now()
         };
       }
-      saveStore(store);
+      await saveStore(store);
       return sendJson(req, res, 200, { ok: true, session });
     }
 
@@ -1918,7 +2137,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       }
       if (Date.now() > session.expiresAt || session.status === 'expired') {
         session.status = 'expired';
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 410, { error: 'Este código expirou. Gere um novo código no painel dos pais.' });
       }
       if (session.status === 'confirmed') {
@@ -1934,7 +2153,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         platform: platform || 'Web'
       };
       store.pairings[session.code] = session;
-      saveStore(store);
+      await saveStore(store);
 
       return sendJson(req, res, 200, {
         ok: true,
@@ -1960,7 +2179,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       }
       if (Date.now() > session.expiresAt && session.status === 'waiting') {
         session.status = 'expired';
-        saveStore(store);
+        await saveStore(store);
       }
 
       const claimSecretHeader = String(req.headers['x-pairing-claim'] || '').trim();
@@ -2039,7 +2258,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         family.updatedAt = Date.now();
       }
       store.pairings[code] = session;
-      saveStore(store);
+      await saveStore(store);
 
       return sendJson(req, res, 200, {
         ok: true,
@@ -2079,7 +2298,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
           }
         }
       }
-      saveStore(store);
+      await saveStore(store);
       return sendJson(req, res, 200, { ok: true });
     }
 
@@ -2140,7 +2359,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         };
 
         rooms[roomCode] = room;
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 200, { ok: true, room, playerId });
       }
 
@@ -2183,7 +2402,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
           room.lastEventMessage = `${playerName} entrou na roda!`;
         }
         room.updatedAt = now;
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 200, { ok: true, room, playerId });
       }
 
@@ -2242,7 +2461,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
             ? `Rodada 1 começou! O mestre falou: ${cmd.toUpperCase()}!`
             : `Partida começou! ${room.players[0]?.name || 'Pegador'} está andando na roda!`;
         room.updatedAt = now;
-        saveStore(store);
+        await saveStore(store);
         return sendJson(req, res, 200, { ok: true, room });
       }
 
@@ -2279,7 +2498,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
               room.lastEventMessage = `Rodada ${room.round}: ${room.command.toUpperCase()}!`;
             }
             room.updatedAt = now;
-            saveStore(store);
+            await saveStore(store);
             return sendJson(req, res, 200, { ok: true, room });
           }
 
@@ -2298,7 +2517,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
             }
             room.lastEventMessage = `${player.name} escolheu ${choice.toUpperCase()}!`;
             room.updatedAt = now;
-            saveStore(store);
+            await saveStore(store);
             return sendJson(req, res, 200, { ok: true, room });
           }
         }
@@ -2311,7 +2530,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
             const targetPlayer = room.players[seatTarget];
             room.lastEventMessage = `${player.name} falou: Pato... (${targetPlayer?.name || 'Amigo'})`;
             room.updatedAt = now;
-            saveStore(store);
+            await saveStore(store);
             return sendJson(req, res, 200, { ok: true, room });
           }
 
@@ -2327,7 +2546,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
             const gooseName = room.players[targetIdx]?.name || `Amigo ${targetIdx + 1}`;
             room.lastEventMessage = `${player.name} gritou GANSO para ${gooseName}! Corram na roda!`;
             room.updatedAt = now;
-            saveStore(store);
+            await saveStore(store);
             return sendJson(req, res, 200, { ok: true, room });
           }
 
@@ -2358,7 +2577,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
                 : `O Ganso alcançou ${runner?.name || 'o corredor'}!`;
             }
             room.updatedAt = now;
-            saveStore(store);
+            await saveStore(store);
             return sendJson(req, res, 200, { ok: true, room });
           }
         }
@@ -2379,7 +2598,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
             room.players[0].isHost = true;
             room.hostPlayerId = room.players[0].playerId;
           }
-          saveStore(store);
+          await saveStore(store);
         }
         return sendJson(req, res, 200, { ok: true });
       }
@@ -2390,15 +2609,13 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
 }
 
 export function createFamilySyncBackendPlugin(): Plugin {
-  const rootDir = path.resolve(__dirname, '..');
-  const handler = createFamilyApiHandler({ rootDir });
   return {
     name: 'ajuda-kids-family-sync-backend',
     configureServer(server) {
-      server.middlewares.use(handler);
+      server.middlewares.use(createFamilyApiHandler({ rootDir: server.config.root }));
     },
     configurePreviewServer(server) {
-      server.middlewares.use(handler);
+      server.middlewares.use(createFamilyApiHandler({ rootDir: server.config.root }));
     }
   };
 }
