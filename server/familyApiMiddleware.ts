@@ -205,6 +205,31 @@ function readLocalEnvFiles(rootDir: string): Record<string, string> {
   return result;
 }
 
+function getExternalSupabaseConfig(
+  fileEnv?: Record<string, string>
+): { url: string; serviceKey: string } | null {
+  const url = String(
+    process.env.SUPABASE_URL ||
+      process.env.NEXT_PUBLIC_SUPABASE_URL ||
+      process.env.VITE_SUPABASE_URL ||
+      fileEnv?.SUPABASE_URL ||
+      fileEnv?.NEXT_PUBLIC_SUPABASE_URL ||
+      fileEnv?.VITE_SUPABASE_URL ||
+      ''
+  )
+    .trim()
+    .replace(/\/+$/, '');
+  const serviceKey = String(
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.SUPABASE_SECRET_KEY ||
+      fileEnv?.SUPABASE_SERVICE_ROLE_KEY ||
+      fileEnv?.SUPABASE_SECRET_KEY ||
+      ''
+  ).trim();
+  if (!url || !serviceKey) return null;
+  return { url, serviceKey };
+}
+
 function getExternalKvConfig(): { url: string; token: string } | null {
   const url = String(
     process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || ''
@@ -516,12 +541,61 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
     }
   };
 
+  let lastStorageWarning: string | null = null;
+
   const getStatelessCookieSecret = (): string => {
     const smtp = getSmtpEnvConfig();
     return (process.env.AUTH_COOKIE_SECRET || smtp.EMAIL_PASS || 'ajuda-kids-serverless-otp-key').trim();
   };
 
+  const getSupabaseConfig = () => {
+    if (options.dataDir) return null;
+    const fileEnv = readLocalEnvFiles(options.rootDir);
+    return getExternalSupabaseConfig(fileEnv);
+  };
+
   const loadStore = async (): Promise<ServerStore> => {
+    const supabase = getSupabaseConfig();
+    if (supabase && typeof fetch !== 'undefined') {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      try {
+        const resp = await fetch(
+          `${supabase.url}/rest/v1/ajuda_kids_state?id=eq.primary&select=data`,
+          {
+            headers: {
+              apikey: supabase.serviceKey,
+              Authorization: `Bearer ${supabase.serviceKey}`,
+              Accept: 'application/json'
+            },
+            signal: controller.signal
+          }
+        );
+        if (resp.ok) {
+          const rows: any = await resp.json();
+          lastStorageWarning = null;
+          if (Array.isArray(rows) && rows.length > 0 && rows[0]?.data) {
+            const parsed = normalizeStoreData(rows[0].data);
+            if (useWarmServerlessCache) {
+              (globalThis as any).__ajudaKidsWarmStore = parsed;
+            }
+            return parsed;
+          }
+          return normalizeStoreData({});
+        }
+        lastStorageWarning =
+          resp.status === 404
+            ? 'Tabela public.ajuda_kids_state não encontrada no Supabase. Execute supabase/schema.sql no SQL Editor.'
+            : `Erro HTTP ${resp.status} ao consultar o Supabase.`;
+        console.warn('[Ajuda KIDS Supabase]', lastStorageWarning);
+      } catch (e: any) {
+        lastStorageWarning = `Falha de rede ao ler Supabase: ${String(e?.message || e)}`;
+        console.warn('[Ajuda KIDS Supabase]', lastStorageWarning);
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
     const kv = !options.dataDir ? getExternalKvConfig() : null;
     if (kv && typeof fetch !== 'undefined') {
       const controller = new AbortController();
@@ -590,6 +664,43 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         // ignore cleanup error
       }
       console.error('Error saving family sync store:', e);
+    }
+
+    const supabase = getSupabaseConfig();
+    if (supabase && typeof fetch !== 'undefined') {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      try {
+        const resp = await fetch(`${supabase.url}/rest/v1/ajuda_kids_state?on_conflict=id`, {
+          method: 'POST',
+          headers: {
+            apikey: supabase.serviceKey,
+            Authorization: `Bearer ${supabase.serviceKey}`,
+            'Content-Type': 'application/json',
+            Prefer: 'resolution=merge-duplicates,return=minimal'
+          },
+          body: JSON.stringify({
+            id: 'primary',
+            data: store,
+            updated_at: new Date().toISOString()
+          }),
+          signal: controller.signal
+        });
+        if (resp.ok) {
+          lastStorageWarning = null;
+        } else {
+          lastStorageWarning =
+            resp.status === 404
+              ? 'Tabela public.ajuda_kids_state não encontrada no Supabase. Execute supabase/schema.sql no SQL Editor.'
+              : `Erro HTTP ${resp.status} ao salvar no Supabase.`;
+          console.error('[Ajuda KIDS Supabase]', lastStorageWarning);
+        }
+      } catch (e: any) {
+        lastStorageWarning = `Falha de rede ao salvar no Supabase: ${String(e?.message || e)}`;
+        console.error('[Ajuda KIDS Supabase]', lastStorageWarning);
+      } finally {
+        clearTimeout(timeoutId);
+      }
     }
 
     const kv = !options.dataDir ? getExternalKvConfig() : null;
@@ -888,12 +999,22 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
 
     if (url.startsWith('/api/health') && req.method === 'GET') {
       const smtpEnv = getSmtpEnvConfig();
+      const supabase = getSupabaseConfig();
       const kv = !options.dataDir ? getExternalKvConfig() : null;
       return sendJson(req, res, 200, {
         ok: true,
         runtime: isServerlessRuntime ? 'vercel-serverless' : 'node-local',
         smtpConfigured: Boolean(smtpEnv.EMAIL_USER && smtpEnv.EMAIL_PASS),
-        persistentKvConfigured: Boolean(kv)
+        storageBackend: supabase
+          ? 'supabase'
+          : kv
+          ? 'kv'
+          : isServerlessRuntime
+          ? 'tmp-ephemeral'
+          : 'local-file',
+        persistentKvConfigured: Boolean(supabase || kv),
+        persistentStorageConfigured: Boolean(supabase || kv),
+        ...(lastStorageWarning ? { storageWarning: lastStorageWarning } : {})
       });
     }
 

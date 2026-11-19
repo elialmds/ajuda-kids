@@ -124,11 +124,13 @@ alter table public.activity_completions enable row level security;
 alter table public.game_records enable row level security;
 alter table public.sync_events enable row level security;
 
+drop policy if exists "Families manage own account" on public.family_accounts;
 create policy "Families manage own account"
   on public.family_accounts
   for all
   using (auth.uid() = parent_user_id);
 
+drop policy if exists "Families manage own children" on public.child_profiles;
 create policy "Families manage own children"
   on public.child_profiles
   for all
@@ -138,6 +140,7 @@ create policy "Families manage own children"
     )
   );
 
+drop policy if exists "Families manage own devices" on public.child_devices;
 create policy "Families manage own devices"
   on public.child_devices
   for all
@@ -147,10 +150,38 @@ create policy "Families manage own devices"
     )
   );
 
--- Enable Realtime on core tables
-alter publication supabase_realtime add table public.child_profiles;
-alter publication supabase_realtime add table public.child_devices;
-alter publication supabase_realtime add table public.daily_journeys;
-alter publication supabase_realtime add table public.activity_completions;
-alter publication supabase_realtime add table public.game_records;
-alter publication supabase_realtime add table public.pairing_sessions;
+-- 9. AJUDA_KIDS_STATE (Persistência completa do backend serverless para Vercel + Supabase)
+-- Acessível exclusivamente no backend com SUPABASE_SERVICE_ROLE_KEY (sem políticas públicas)
+create table if not exists public.ajuda_kids_state (
+  id text primary key,
+  data jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.ajuda_kids_state enable row level security;
+
+-- Enable Realtime on core tables (idempotent)
+do $$
+declare
+  tbl text;
+  tables text[] := array[
+    'child_profiles',
+    'child_devices',
+    'daily_journeys',
+    'activity_completions',
+    'game_records',
+    'pairing_sessions'
+  ];
+begin
+  foreach tbl in array tables loop
+    if not exists (
+      select 1
+      from pg_publication_tables
+      where pubname = 'supabase_realtime'
+        and schemaname = 'public'
+        and tablename = tbl
+    ) then
+      execute format('alter publication supabase_realtime add table public.%I', tbl);
+    end if;
+  end loop;
+end $$;

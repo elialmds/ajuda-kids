@@ -5,7 +5,7 @@ import path from 'path';
 import { Readable } from 'stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createFamilyApiHandler } from '../server/familyApiMiddleware';
-import vercelApiHandler from '../api/[...path]';
+import vercelApiHandler from '../api/index.js';
 import {
   advanceMonotonicAngle,
   computeForwardLapTarget,
@@ -581,7 +581,7 @@ describe('Fase 1 — Estabilização: Segurança HTTP, Rate Limits, Pareamento e
 
     const healthRewritten = await runMock(
       (req, res) => vercelApiHandler(req, res),
-      '/api/[...path]?path=health',
+      '/api/index?__path=health',
       'GET'
     );
     expect(healthRewritten.status).toBe(200);
@@ -589,7 +589,7 @@ describe('Fase 1 — Estabilização: Segurança HTTP, Rate Limits, Pareamento e
 
     const parsedBodyValidation = await runMock(
       (req, res) => vercelApiHandler(req, res),
-      '/api/auth/request-email-verification',
+      '/api/index?__path=auth/request-email-verification',
       'POST',
       { email: 'invalido' }
     );
@@ -651,6 +651,142 @@ describe('Fase 1 — Estabilização: Segurança HTTP, Rate Limits, Pareamento e
     } finally {
       fs.rmSync(dirA, { recursive: true, force: true });
       fs.rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+
+  it('persiste e carrega estado via Supabase PostgREST quando SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY estão ativos', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-supa-root-'));
+    const origFetch = globalThis.fetch;
+    const origUrl = process.env.SUPABASE_URL;
+    const origKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const origVercel = process.env.VERCEL;
+    let savedRowData: any = null;
+
+    process.env.SUPABASE_URL = 'https://exemplo-ajuda.supabase.co';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'sb_service_role_test_key';
+    process.env.VERCEL = '1';
+
+    (globalThis as any).fetch = async (url: string, init?: RequestInit) => {
+      expect(String(url)).toContain('https://exemplo-ajuda.supabase.co/rest/v1/ajuda_kids_state');
+      const headers = (init?.headers || {}) as Record<string, string>;
+      expect(headers.apikey).toBe('sb_service_role_test_key');
+
+      if ((init?.method || 'GET').toUpperCase() === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}'));
+        expect(body.id).toBe('primary');
+        savedRowData = body.data;
+        return new Response(null, { status: 201 });
+      }
+      return new Response(JSON.stringify(savedRowData ? [{ data: savedRowData }] : []), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    try {
+      let otpCode = '';
+      const supaHandler = createFamilyApiHandler({
+        rootDir: tempRoot,
+        getSmtpEnv: () => ({
+          SMTP_HOST: 'smtp.gmail.com',
+          SMTP_PORT: 587,
+          SMTP_SECURE: false,
+          EMAIL_USER: 'supa@gmail.com',
+          EMAIL_PASS: 'supa-app-pass',
+          EMAIL_FROM: 'Ajuda KIDS <supa@gmail.com>'
+        }),
+        sendMailOverride: async (mail) => {
+          otpCode = mail.html.match(/>\s*(\d{6})\s*</)?.[1] || '';
+          return { accepted: [mail.to], messageId: '<supa-1@test>' };
+        }
+      });
+
+      const callSupa = (url: string, method: string, bodyObj?: any): Promise<{ status: number; data: any }> =>
+        new Promise((resolve) => {
+          const req = Object.assign(Readable.from([]), {
+            url,
+            method,
+            headers: {},
+            body: bodyObj,
+            socket: { remoteAddress: '127.0.0.1' }
+          }) as unknown as http.IncomingMessage;
+          let statusCode = 200;
+          const chunks: string[] = [];
+          const res = {
+            get statusCode() {
+              return statusCode;
+            },
+            set statusCode(val: number) {
+              statusCode = val;
+            },
+            setHeader() {},
+            end(chunk?: any) {
+              if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+              resolve({ status: statusCode, data: JSON.parse(chunks.join('') || '{}') });
+            }
+          } as unknown as http.ServerResponse;
+          Promise.resolve(supaHandler(req, res, () => {})).catch(() => {});
+        });
+
+      const health = await callSupa('/api/health', 'GET');
+      expect(health.status).toBe(200);
+      expect(health.data.storageBackend).toBe('supabase');
+      expect(health.data.persistentStorageConfigured).toBe(true);
+
+      const reqOtp = await callSupa('/api/auth/request-email-verification', 'POST', {
+        parentName: 'Pai Supabase',
+        username: 'pai.supa',
+        email: 'pai_supa@gmail.com',
+        password: 'Password@99',
+        passwordHash: 'h_supa',
+        passwordSalt: 's_supa',
+        settings: {}
+      });
+      expect(reqOtp.status).toBe(200);
+      expect(savedRowData?.emailVerifications?.['pai_supa@gmail.com']).toBeTruthy();
+
+      // Simula nova instância fria da Vercel lendo exclusivamente do Supabase mockado
+      delete (globalThis as any).__ajudaKidsWarmStore;
+      const coldHandler = createFamilyApiHandler({ rootDir: tempRoot });
+      const confirmRes = await new Promise<{ status: number; data: any }>((resolve) => {
+        const req = Object.assign(Readable.from([]), {
+          url: '/api/auth/confirm-email-verification',
+          method: 'POST',
+          headers: {},
+          body: { email: 'pai_supa@gmail.com', code: otpCode },
+          socket: { remoteAddress: '127.0.0.1' }
+        }) as unknown as http.IncomingMessage;
+        let statusCode = 200;
+        const chunks: string[] = [];
+        const res = {
+          get statusCode() {
+            return statusCode;
+          },
+          set statusCode(val: number) {
+            statusCode = val;
+          },
+          setHeader() {},
+          end(chunk?: any) {
+            if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+            resolve({ status: statusCode, data: JSON.parse(chunks.join('') || '{}') });
+          }
+        } as unknown as http.ServerResponse;
+        Promise.resolve(coldHandler(req, res, () => {})).catch(() => {});
+      });
+
+      expect(confirmRes.status).toBe(200);
+      expect(confirmRes.data.ok).toBe(true);
+      expect(Object.keys(savedRowData?.sessions || {}).length).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = origUrl;
+      if (origKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+      else process.env.SUPABASE_SERVICE_ROLE_KEY = origKey;
+      if (origVercel === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = origVercel;
+      delete (globalThis as any).__ajudaKidsWarmStore;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
 });
