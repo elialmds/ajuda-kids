@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      try {
+        if (localStorage.getItem('ajuda_kids_theme_v7') === 'dark') {
+          document.documentElement.classList.add('dark');
+        }
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='28' fill='%237047E8'/><circle cx='50' cy='52' r='34' fill='%234389F5'/><path d='M34 58 Q50 74 66 58' stroke='white' stroke-width='7' fill='none' stroke-linecap='round'/><circle cx='38' cy='46' r='5.5' fill='white'/><circle cx='62' cy='46' r='5.5' fill='white'/><circle cx='50' cy='24' r='7' fill='%23FFD34E'/></svg>" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Ajuda KIDS — Plataforma de Desenvolvimento Infantil</title>
+    <meta name="description" content="Plataforma de desenvolvimento infantil saudável com atividades guiadas de 20 a 30 minutos por dia, estímulo cognitivo, emocional, motor e controle parental." />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&family=Nunito:wght@600;700;800;900&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-[#F5F3FC] dark:bg-[#121024] text-[#25233A] dark:text-[#F8F7FF] antialiased selection:bg-[#7047E8]/20 selection:text-[#25233A] dark:selection:bg-[#7047E8] dark:selection:text-white min-h-screen transition-colors duration-300">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

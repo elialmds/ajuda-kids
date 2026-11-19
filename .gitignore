@@ -1,0 +1,11 @@
+# Dependências e builds
+node_modules/
+dist/
+
+# Variáveis de ambiente e segredos locais
+.env
+.env.*
+.env.local
+
+# Banco de dados local em arquivo
+.data/

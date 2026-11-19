@@ -1,0 +1,337 @@
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gerador de Nuvem de Palavras Premium</title>
+    
+    <!-- Fontes e Ícones -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- WordCloud2.js via CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/wordcloud2.js/1.2.2/wordcloud2.min.js"></script>
+
+    <style>
+        :root {
+            --bg-base: #0b0f19;
+            --glass-bg: rgba(30, 41, 59, 0.7);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --accent-blue: #3b82f6;
+            --accent-cyan: #06b6d4;
+            --accent-purple: #8b5cf6;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            min-height: 100vh;
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* Fundo Animado Premium */
+        .bg-mesh {
+            position: fixed;
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            background: radial-gradient(circle at 20% 80%, rgba(139, 92, 246, 0.1), transparent 30%),
+                        radial-gradient(circle at 80% 20%, rgba(6, 182, 212, 0.1), transparent 30%);
+            z-index: -1;
+            animation: breathe 15s infinite alternate;
+        }
+
+        @keyframes breathe {
+            from { transform: scale(1); }
+            to { transform: scale(1.1); }
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1200px;
+            padding: 40px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 30px;
+        }
+
+        header {
+            text-align: center;
+            animation: fadeInDown 0.8s ease;
+        }
+
+        h1 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 3rem;
+            margin: 0 0 10px 0;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        p.subtitle {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+            margin: 0;
+        }
+
+        /* Painel Glassmorphism */
+        .glass-panel {
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--glass-border);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+            animation: slideUp 0.8s ease forwards;
+            opacity: 0;
+        }
+
+        .delay-1 { animation-delay: 0.2s; }
+        .delay-2 { animation-delay: 0.4s; }
+
+        .input-section {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        textarea {
+            width: 100%;
+            height: 200px;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+            padding: 20px;
+            color: #fff;
+            font-family: 'Inter', sans-serif;
+            font-size: 1rem;
+            resize: vertical;
+            transition: border-color 0.3s;
+            box-sizing: border-box;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+            background: rgba(15, 23, 42, 0.8);
+        }
+
+        .btn-gerar {
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            color: #fff;
+            border: none;
+            padding: 16px 32px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            align-self: center;
+        }
+
+        .btn-gerar:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(139, 92, 246, 0.4);
+        }
+
+        /* Área do Canvas */
+        .cloud-section {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 500px;
+            position: relative;
+        }
+
+        canvas {
+            width: 100%;
+            height: 500px;
+            border-radius: 12px;
+            cursor: pointer;
+        }
+
+        .empty-state {
+            position: absolute;
+            color: var(--text-muted);
+            font-size: 1.2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            pointer-events: none;
+        }
+
+        .empty-state i {
+            font-size: 3rem;
+            color: rgba(255,255,255,0.1);
+        }
+
+        @keyframes fadeInDown {
+            from { opacity: 0; transform: translateY(-30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+
+<div class="bg-mesh"></div>
+
+<div class="container">
+    <header>
+        <h1><i class="fa-solid fa-cloud"></i> WordCloud Studio</h1>
+        <p class="subtitle">O gerador de Nuvens de Palavras mais elegante e interativo.</p>
+    </header>
+
+    <!-- Área de Input -->
+    <section class="glass-panel input-section delay-1">
+        <div>
+            <h2 style="margin: 0 0 10px 0; font-size: 1.2rem; color: #fff;">1. Cole o seu texto aqui</h2>
+            <p style="margin: 0 0 15px 0; font-size: 0.9rem; color: var(--text-muted);">
+                Artigos, notícias, discursos, redações... Cole qualquer coisa! Nós removeremos palavras irrelevantes automaticamente.
+            </p>
+        </div>
+        
+        <textarea id="textoInput" placeholder="Ex: A inteligência artificial está transformando a forma como interagimos com a tecnologia. A tecnologia do futuro começa hoje..."></textarea>
+        
+        <button class="btn-gerar" onclick="gerarNuvem()">
+            <i class="fa-solid fa-wand-magic-sparkles"></i> Gerar Nuvem de Palavras
+        </button>
+    </section>
+
+    <!-- Área da Nuvem -->
+    <section class="glass-panel cloud-section delay-2">
+        <div class="empty-state" id="emptyState">
+            <i class="fa-solid fa-cloud"></i>
+            Sua nuvem aparecerá aqui
+        </div>
+        <canvas id="cloudCanvas"></canvas>
+    </section>
+</div>
+
+<script>
+    // Configura o tamanho real do canvas para evitar esticamentos
+    function resizeCanvas() {
+        const canvas = document.getElementById('cloudCanvas');
+        const section = document.querySelector('.cloud-section');
+        canvas.width = section.clientWidth - 60; // Desconta padding
+        canvas.height = 500;
+    }
+    
+    window.addEventListener('resize', resizeCanvas);
+    window.addEventListener('load', resizeCanvas);
+
+    // Lista de Stop Words comuns em Português
+    const stopWords = new Set([
+        "a", "o", "e", "é", "de", "do", "da", "dos", "das", "em", "no", "na", "nos", "nas", 
+        "um", "uma", "uns", "umas", "para", "por", "com", "sem", "que", "se", "os", "as", 
+        "como", "mas", "foi", "ao", "ele", "ela", "eles", "elas", "tem", "à", "seu", "sua", 
+        "seus", "suas", "meu", "minha", "teu", "tua", "nós", "vós", "ou", "nem", "são", 
+        "isso", "isto", "aquilo", "este", "esta", "esse", "essa", "está", "também", "mais",
+        "não", "já", "só", "muito", "quando", "onde", "quem", "qual", "pelo", "pela"
+    ]);
+
+    function gerarNuvem() {
+        const texto = document.getElementById('textoInput').value;
+        if (!texto.trim()) {
+            alert("Por favor, cole algum texto antes de gerar a nuvem!");
+            return;
+        }
+
+        if (typeof WordCloud === 'undefined') {
+            alert("Erro: A biblioteca WordCloud não carregou. Sua internet pode estar bloqueando o script.");
+            return;
+        }
+
+        // Esconde o texto "Sua nuvem aparecerá aqui"
+        document.getElementById('emptyState').style.display = 'none';
+
+        // Feedback visual no botão
+        const btn = document.querySelector('.btn-gerar');
+        const originalBtnText = btn.innerHTML;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Desenhando...';
+        btn.style.pointerEvents = 'none';
+
+        // 1. Limpar e processar o texto
+        const textoLimpo = texto.toLowerCase().replace(/[.,!?;:()""''
+]/g, ' ');
+        const palavras = textoLimpo.split(/\s+/);
+
+        const contagem = {};
+        let maiorFreq = 0;
+
+        palavras.forEach(palavra => {
+            if (palavra.length > 2 && !stopWords.has(palavra)) {
+                contagem[palavra] = (contagem[palavra] || 0) + 1;
+                if (contagem[palavra] > maiorFreq) {
+                    maiorFreq = contagem[palavra];
+                }
+            }
+        });
+
+        const listaPalavras = Object.keys(contagem).map(p => {
+            return [p, contagem[p]];
+        });
+
+        listaPalavras.sort((a, b) => b[1] - a[1]);
+
+        if (listaPalavras.length === 0) {
+            alert("Não foram encontradas palavras úteis suficientes para gerar a nuvem. Tente um texto maior.");
+            btn.innerHTML = originalBtnText;
+            btn.style.pointerEvents = 'auto';
+            document.getElementById('emptyState').style.display = 'flex';
+            return;
+        }
+
+        const canvas = document.getElementById('cloudCanvas');
+
+        // 4. Desenhar a Nuvem!
+        WordCloud(canvas, {
+            list: listaPalavras,
+            gridSize: 8,
+            weightFactor: function (size) {
+                // Escala segura: a palavra mais frequente tem tamanho máximo de 90px.
+                // Palavras menores terão o tamanho proporcional, com mínimo de 14px.
+                return Math.max(14, (size * 90) / maiorFreq);
+            },
+            fontFamily: "'Outfit', 'Inter', sans-serif",
+            color: function (word, weight) {
+                const cores = ['#3b82f6', '#06b6d4', '#8b5cf6', '#10b981', '#f472b6', '#fcd34d', '#f8fafc'];
+                return cores[Math.floor(Math.random() * cores.length)];
+            },
+            backgroundColor: 'transparent',
+            rotateRatio: 0.3, 
+            rotationSteps: 2,
+            shape: 'circle',
+            drawOutOfBound: false,
+            shrinkToFit: true,
+            minSize: 10
+        });
+
+        // Restaura o botão após o tempo de renderização
+        setTimeout(() => {
+            btn.innerHTML = originalBtnText;
+            btn.style.pointerEvents = 'auto';
+        }, 1500);
+    }
+</script>
+
+</body>
+</html>
