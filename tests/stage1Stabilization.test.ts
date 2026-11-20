@@ -663,13 +663,14 @@ describe('Fase 1 — Estabilização: Segurança HTTP, Rate Limits, Pareamento e
     let savedRowData: any = null;
 
     process.env.SUPABASE_URL = 'https://exemplo-ajuda.supabase.co';
-    process.env.SUPABASE_SERVICE_ROLE_KEY = 'sb_service_role_test_key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'sb_secret_test_key';
     process.env.VERCEL = '1';
 
     (globalThis as any).fetch = async (url: string, init?: RequestInit) => {
       expect(String(url)).toContain('https://exemplo-ajuda.supabase.co/rest/v1/ajuda_kids_state');
       const headers = (init?.headers || {}) as Record<string, string>;
-      expect(headers.apikey).toBe('sb_service_role_test_key');
+      expect(headers.apikey).toBe('sb_secret_test_key');
+      expect(headers.Authorization).toBeUndefined();
 
       if ((init?.method || 'GET').toUpperCase() === 'POST') {
         const body = JSON.parse(String(init?.body || '{}'));

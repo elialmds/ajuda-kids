@@ -554,6 +554,19 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
     return getExternalSupabaseConfig(fileEnv);
   };
 
+  const buildSupabaseHeaders = (
+    serviceKey: string,
+    extra: Record<string, string> = {}
+  ): Record<string, string> => {
+    const cleanKey = serviceKey.trim();
+    const isJwt = cleanKey.startsWith('eyJ') && cleanKey.split('.').length === 3;
+    return {
+      apikey: cleanKey,
+      ...(isJwt ? { Authorization: `Bearer ${cleanKey}` } : {}),
+      ...extra
+    };
+  };
+
   const loadStore = async (): Promise<ServerStore> => {
     const supabase = getSupabaseConfig();
     if (supabase && typeof fetch !== 'undefined') {
@@ -563,11 +576,9 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         const resp = await fetch(
           `${supabase.url}/rest/v1/ajuda_kids_state?id=eq.primary&select=data`,
           {
-            headers: {
-              apikey: supabase.serviceKey,
-              Authorization: `Bearer ${supabase.serviceKey}`,
+            headers: buildSupabaseHeaders(supabase.serviceKey, {
               Accept: 'application/json'
-            },
+            }),
             signal: controller.signal
           }
         );
@@ -583,10 +594,11 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
           }
           return normalizeStoreData({});
         }
+        const errBody = (await resp.text().catch(() => '')).slice(0, 140).trim();
         lastStorageWarning =
           resp.status === 404
             ? 'Tabela public.ajuda_kids_state não encontrada no Supabase. Execute supabase/schema.sql no SQL Editor.'
-            : `Erro HTTP ${resp.status} ao consultar o Supabase.`;
+            : `Erro HTTP ${resp.status} ao consultar o Supabase${errBody ? `: ${errBody}` : '.'}`;
         console.warn('[Ajuda KIDS Supabase]', lastStorageWarning);
       } catch (e: any) {
         lastStorageWarning = `Falha de rede ao ler Supabase: ${String(e?.message || e)}`;
@@ -673,12 +685,10 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       try {
         const resp = await fetch(`${supabase.url}/rest/v1/ajuda_kids_state?on_conflict=id`, {
           method: 'POST',
-          headers: {
-            apikey: supabase.serviceKey,
-            Authorization: `Bearer ${supabase.serviceKey}`,
+          headers: buildSupabaseHeaders(supabase.serviceKey, {
             'Content-Type': 'application/json',
             Prefer: 'resolution=merge-duplicates,return=minimal'
-          },
+          }),
           body: JSON.stringify({
             id: 'primary',
             data: store,
@@ -689,10 +699,11 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         if (resp.ok) {
           lastStorageWarning = null;
         } else {
+          const errBody = (await resp.text().catch(() => '')).slice(0, 140).trim();
           lastStorageWarning =
             resp.status === 404
               ? 'Tabela public.ajuda_kids_state não encontrada no Supabase. Execute supabase/schema.sql no SQL Editor.'
-              : `Erro HTTP ${resp.status} ao salvar no Supabase.`;
+              : `Erro HTTP ${resp.status} ao salvar no Supabase${errBody ? `: ${errBody}` : '.'}`;
           console.error('[Ajuda KIDS Supabase]', lastStorageWarning);
         }
       } catch (e: any) {
@@ -1001,6 +1012,9 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       const smtpEnv = getSmtpEnvConfig();
       const supabase = getSupabaseConfig();
       const kv = !options.dataDir ? getExternalKvConfig() : null;
+      if (supabase) {
+        await loadStore();
+      }
       return sendJson(req, res, 200, {
         ok: true,
         runtime: isServerlessRuntime ? 'vercel-serverless' : 'node-local',
@@ -1014,6 +1028,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
           : 'local-file',
         persistentKvConfigured: Boolean(supabase || kv),
         persistentStorageConfigured: Boolean(supabase || kv),
+        ...(supabase ? { supabaseConnected: !lastStorageWarning } : {}),
         ...(lastStorageWarning ? { storageWarning: lastStorageWarning } : {})
       });
     }
