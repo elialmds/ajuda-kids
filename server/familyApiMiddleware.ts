@@ -698,6 +698,73 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         });
         if (resp.ok) {
           lastStorageWarning = null;
+          // Espelha também nas tabelas relacionais para visualização direta no Table Editor do Supabase
+          try {
+            const familyEntries = Object.values(store.families || {}) as any[];
+            const familyRows = familyEntries
+              .filter(f => f?.familyAccount?.id && f?.familyAccount?.parentName)
+              .map(f => {
+                const acc = f.familyAccount;
+                return {
+                  id: String(acc.id),
+                  parent_name: String(acc.parentName || '').trim() || 'Responsável',
+                  parent_email: String(acc.parentEmail || '').trim(),
+                  family_name: String(acc.familyName || 'Família Ajuda KIDS').trim(),
+                  settings: {
+                    maxDailyMinutes: acc.settings?.maxDailyMinutes ?? 30,
+                    allowedTimeRange: acc.settings?.allowedTimeRange || { start: '08:00', end: '20:30' },
+                    unlimitedGames: Boolean(acc.settings?.unlimitedGames),
+                    themePreference: acc.settings?.themePreference || 'light'
+                  },
+                  created_at: acc.createdAt || new Date().toISOString(),
+                  updated_at: acc.updatedAt || new Date().toISOString()
+                };
+              });
+            if (familyRows.length > 0) {
+              await fetch(`${supabase.url}/rest/v1/family_accounts?on_conflict=id`, {
+                method: 'POST',
+                headers: buildSupabaseHeaders(supabase.serviceKey, {
+                  'Content-Type': 'application/json',
+                  Prefer: 'resolution=merge-duplicates,return=minimal'
+                }),
+                body: JSON.stringify(familyRows),
+                signal: controller.signal
+              });
+            }
+            const childRows = familyEntries.flatMap(f => {
+              const famId = String(f?.familyAccount?.id || '');
+              if (!famId || !Array.isArray(f?.children)) return [];
+              return f.children
+                .filter((c: any) => c?.id && c?.name)
+                .map((c: any) => ({
+                  id: String(c.id),
+                  family_id: famId,
+                  name: String(c.name || 'Criança'),
+                  nickname: c.nickname ? String(c.nickname) : null,
+                  age: Number(c.age) || 6,
+                  birth_date: c.birthdate || null,
+                  avatar: String(c.avatar || 'Lumi'),
+                  companion_id: String(c.companionId || 'Lumi'),
+                  age_group: ['4-6', '7-9', '10-12'].includes(c.ageGroup) ? c.ageGroup : '7-9',
+                  learning_preferences: c.learningPreferences || {},
+                  created_at: c.createdAt || new Date().toISOString(),
+                  updated_at: c.updatedAt || new Date().toISOString()
+                }));
+            });
+            if (childRows.length > 0) {
+              await fetch(`${supabase.url}/rest/v1/child_profiles?on_conflict=id`, {
+                method: 'POST',
+                headers: buildSupabaseHeaders(supabase.serviceKey, {
+                  'Content-Type': 'application/json',
+                  Prefer: 'resolution=merge-duplicates,return=minimal'
+                }),
+                body: JSON.stringify(childRows),
+                signal: controller.signal
+              });
+            }
+          } catch {
+            // Não bloqueia persistência principal em ajuda_kids_state
+          }
         } else {
           const errBody = (await resp.text().catch(() => '')).slice(0, 140).trim();
           lastStorageWarning =

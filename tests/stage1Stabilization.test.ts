@@ -661,19 +661,30 @@ describe('Fase 1 — Estabilização: Segurança HTTP, Rate Limits, Pareamento e
     const origKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const origVercel = process.env.VERCEL;
     let savedRowData: any = null;
+    let savedFamilyRows: any[] = [];
 
     process.env.SUPABASE_URL = 'https://exemplo-ajuda.supabase.co';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'sb_secret_test_key';
     process.env.VERCEL = '1';
 
     (globalThis as any).fetch = async (url: string, init?: RequestInit) => {
-      expect(String(url)).toContain('https://exemplo-ajuda.supabase.co/rest/v1/ajuda_kids_state');
+      const urlStr = String(url);
+      expect(urlStr).toMatch(
+        /^https:\/\/exemplo-ajuda\.supabase\.co\/rest\/v1\/(ajuda_kids_state|family_accounts|child_profiles)/
+      );
       const headers = (init?.headers || {}) as Record<string, string>;
       expect(headers.apikey).toBe('sb_secret_test_key');
       expect(headers.Authorization).toBeUndefined();
 
       if ((init?.method || 'GET').toUpperCase() === 'POST') {
         const body = JSON.parse(String(init?.body || '{}'));
+        if (urlStr.includes('/family_accounts')) {
+          savedFamilyRows = Array.isArray(body) ? body : [body];
+          return new Response(null, { status: 201 });
+        }
+        if (urlStr.includes('/child_profiles')) {
+          return new Response(null, { status: 201 });
+        }
         expect(body.id).toBe('primary');
         savedRowData = body.data;
         return new Response(null, { status: 201 });
@@ -778,6 +789,7 @@ describe('Fase 1 — Estabilização: Segurança HTTP, Rate Limits, Pareamento e
       expect(confirmRes.status).toBe(200);
       expect(confirmRes.data.ok).toBe(true);
       expect(Object.keys(savedRowData?.sessions || {}).length).toBeGreaterThan(0);
+      expect(savedFamilyRows[0]?.parent_name).toBe('Pai Supabase');
     } finally {
       globalThis.fetch = origFetch;
       if (origUrl === undefined) delete process.env.SUPABASE_URL;
