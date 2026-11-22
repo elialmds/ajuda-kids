@@ -160,6 +160,18 @@ create table if not exists public.ajuda_kids_state (
 
 alter table public.ajuda_kids_state enable row level security;
 
+-- Permissões explícitas para o backend (service_role) via PostgREST
+grant usage on schema public to service_role;
+grant select, insert, update, delete on table public.ajuda_kids_state to service_role;
+grant select, insert, update, delete on table public.family_accounts to service_role;
+grant select, insert, update, delete on table public.child_profiles to service_role;
+grant select, insert, update, delete on table public.child_devices to service_role;
+grant select, insert, update, delete on table public.pairing_sessions to service_role;
+grant select, insert, update, delete on table public.daily_journeys to service_role;
+grant select, insert, update, delete on table public.activity_completions to service_role;
+grant select, insert, update, delete on table public.game_records to service_role;
+grant select, insert, update, delete on table public.sync_events to service_role;
+
 -- Enable Realtime on core tables (idempotent)
 do $$
 declare
