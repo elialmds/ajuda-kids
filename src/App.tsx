@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { AppProvider, useApp } from '@/modules/context/AppContext';
 import { Header } from '@/components/layout/Header';
 import { ChildNavBar, ChildTab } from '@/components/layout/ChildNavBar';
@@ -18,9 +18,13 @@ import { WelcomeParkHero } from '@/modules/welcome/WelcomeParkHero';
 import { ParentAuthView } from '@/modules/auth/ParentAuthView';
 import { FamilyWelcomeHub } from '@/modules/family-hub/FamilyWelcomeHub';
 import { PinModal } from '@/components/common/PinModal';
+import { AboutView } from '@/components/common/AboutView';
 import { ThematicPageBackground } from '@/components/illustrations/ThematicPageBackgrounds';
 import { Sparkles } from 'lucide-react';
 import { ChildProfile, SkillArea } from '@/types';
+
+const isSobrePathname = () =>
+  typeof window !== 'undefined' && /^\/sobre\/?$/i.test(window.location.pathname);
 
 const AppContent: React.FC = () => {
   const {
@@ -58,6 +62,34 @@ const AppContent: React.FC = () => {
   const [isBreathingModalOpen, setIsBreathingModalOpen] = useState(false);
   const [isParentPinModalOpen, setIsParentPinModalOpen] = useState(false);
   const [pendingParentDestination, setPendingParentDestination] = useState<'parent' | 'family-hub'>('parent');
+  const [isAboutOpen, setIsAboutOpen] = useState<boolean>(() => isSobrePathname());
+  const [isDirectSobreRoute, setIsDirectSobreRoute] = useState<boolean>(() => isSobrePathname());
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onPopState = () => {
+      const sobre = isSobrePathname();
+      setIsDirectSobreRoute(sobre);
+      setIsAboutOpen(sobre);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  const openAbout = () => {
+    setIsAboutOpen(true);
+    if (typeof window !== 'undefined' && window.history?.pushState && !isSobrePathname()) {
+      window.history.pushState({}, '', '/sobre');
+    }
+  };
+
+  const closeAbout = () => {
+    setIsAboutOpen(false);
+    setIsDirectSobreRoute(false);
+    if (typeof window !== 'undefined' && isSobrePathname() && window.history?.pushState) {
+      window.history.pushState({}, '', '/');
+    }
+  };
 
   const requestProtectedNavigation = (dest: 'parent' | 'family-hub') => {
     if (isParentUnlocked) {
@@ -92,6 +124,10 @@ const AppContent: React.FC = () => {
     setActiveTab(tab);
   };
 
+  if (isDirectSobreRoute && isAboutOpen) {
+    return <AboutView onClose={closeAbout} />;
+  }
+
   if (isLoading) {
     return (
       <div className="min-h-screen bg-[#F4F7FB] dark:bg-[#0E1324] flex flex-col items-center justify-center p-4 transition-colors">
@@ -109,10 +145,14 @@ const AppContent: React.FC = () => {
   // 1. FIRST OPENING & ROUTE PROTECTION: Unauthenticated parent -> dedicated Parent Auth View
   if (!isAuthenticated && !isPairedChildDevice) {
     return (
-      <ParentAuthView
-        initialPairingCode={urlPairingCode}
-        onPairingComplete={() => setUrlPairingCode(null)}
-      />
+      <>
+        <ParentAuthView
+          initialPairingCode={urlPairingCode}
+          onPairingComplete={() => setUrlPairingCode(null)}
+          onOpenAbout={openAbout}
+        />
+        {isAboutOpen && <AboutView asModal onClose={closeAbout} />}
+      </>
     );
   }
 
@@ -128,6 +168,7 @@ const AppContent: React.FC = () => {
           onEnterChild={handleEnterChildWorld}
           onOpenParentDashboard={() => setIsParentPinModalOpen(true)}
           onOpenCreateChild={() => setIsCreateProfileOpen(true)}
+          onOpenAbout={openAbout}
         />
 
         <PinModal
@@ -154,6 +195,8 @@ const AppContent: React.FC = () => {
             <span>{toastMessage}</span>
           </div>
         )}
+
+        {isAboutOpen && <AboutView asModal onClose={closeAbout} />}
       </>
     );
   }
@@ -213,6 +256,7 @@ const AppContent: React.FC = () => {
           setCurrentView('child');
         }}
         onOpenFamilyHub={() => requestProtectedNavigation('family-hub')}
+        onOpenAbout={openAbout}
       />
 
       <main className={`relative z-10 flex-1 w-full mx-auto p-4 sm:p-6 pb-28 sm:pb-10 ${currentView === 'parent' ? 'max-w-7xl' : 'max-w-6xl'}`}>
@@ -318,6 +362,8 @@ const AppContent: React.FC = () => {
           </div>
         </div>
       )}
+
+      {isAboutOpen && <AboutView asModal onClose={closeAbout} />}
     </div>
   );
 };

@@ -18,7 +18,8 @@ import {
   RotateCw,
   Edit3,
   Sun,
-  Moon
+  Moon,
+  Info
 } from 'lucide-react';
 import { useApp } from '@/modules/context/AppContext';
 import { MUNDO_COMPANIONS } from '@/data/charactersData';
@@ -101,11 +102,13 @@ type AuthTab = 'login' | 'register' | 'recover' | 'pair';
 interface ParentAuthViewProps {
   initialPairingCode?: string | null;
   onPairingComplete?: () => void;
+  onOpenAbout?: () => void;
 }
 
 export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
   initialPairingCode,
-  onPairingComplete
+  onPairingComplete,
+  onOpenAbout
 }) => {
   const {
     requestRegistrationVerification,
@@ -557,25 +560,40 @@ export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
       <div className="max-w-6xl w-full mx-auto flex items-center justify-between gap-3 z-10">
         <AjudaKidsBrandBadge size={44} subtitle="ESPAÇO SEGURO PARA FAMÍLIAS" />
 
-        <button
-          type="button"
-          onClick={toggleDarkMode}
-          aria-pressed={isDarkMode}
-          aria-label={isDarkMode ? 'Mudar para Modo Claro' : 'Mudar para Modo Escuro'}
-          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-full bg-white/95 dark:bg-[#1E1B3A] border border-[#E4DFF5] dark:border-[#38316B] text-xs font-extrabold text-[#25233A] dark:text-[#F8F7FF] shadow-xs hover:bg-[#EFEAFC] dark:hover:bg-[#27234D] transition-all"
-        >
-          {isDarkMode ? (
-            <>
-              <Sun size={15} className="text-[#FFD34E]" />
-              <span>Modo Claro</span>
-            </>
-          ) : (
-            <>
-              <Moon size={15} className="text-[#7047E8]" />
-              <span>Modo Escuro</span>
-            </>
+        <div className="flex items-center gap-2">
+          {onOpenAbout && (
+            <button
+              type="button"
+              data-testid="auth-about-button"
+              onClick={onOpenAbout}
+              aria-label="Sobre o Ajuda KIDS"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-white/95 dark:bg-[#1E1B3A] border border-[#E4DFF5] dark:border-[#38316B] text-xs font-extrabold text-[#25233A] dark:text-[#F8F7FF] shadow-xs hover:bg-[#EFEAFC] dark:hover:bg-[#27234D] transition-all"
+            >
+              <Info size={15} className="text-[#7047E8] dark:text-[#B5A0FF]" />
+              <span>Sobre</span>
+            </button>
           )}
-        </button>
+
+          <button
+            type="button"
+            onClick={toggleDarkMode}
+            aria-pressed={isDarkMode}
+            aria-label={isDarkMode ? 'Mudar para Modo Claro' : 'Mudar para Modo Escuro'}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-full bg-white/95 dark:bg-[#1E1B3A] border border-[#E4DFF5] dark:border-[#38316B] text-xs font-extrabold text-[#25233A] dark:text-[#F8F7FF] shadow-xs hover:bg-[#EFEAFC] dark:hover:bg-[#27234D] transition-all"
+          >
+            {isDarkMode ? (
+              <>
+                <Sun size={15} className="text-[#FFD34E]" />
+                <span>Modo Claro</span>
+              </>
+            ) : (
+              <>
+                <Moon size={15} className="text-[#7047E8]" />
+                <span>Modo Escuro</span>
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Main Content Split Grid */}
@@ -1271,8 +1289,19 @@ export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
       </div>
 
       {/* Bottom Legal / Product Line */}
-      <div className="max-w-6xl w-full mx-auto text-center text-[11px] font-bold text-[#5A6D91] dark:text-[#94A3B8] z-10">
-        Ajuda KIDS — Plataforma Educativa Familiar Multi-Dispositivo • Dados protegidos com criptografia local e sincronia segura
+      <div className="max-w-6xl w-full mx-auto text-center text-[11px] font-bold text-[#5A6D91] dark:text-[#94A3B8] z-10 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+        <span>
+          Ajuda KIDS — Desenvolvido por Eliabe Almeida Gomes • Plataforma Educativa Familiar Multi-Dispositivo
+        </span>
+        {onOpenAbout && (
+          <button
+            type="button"
+            onClick={onOpenAbout}
+            className="font-extrabold underline text-[#7047E8] dark:text-[#B5A0FF] hover:opacity-80"
+          >
+            Sobre o projeto
+          </button>
+        )}
       </div>
     </div>
   );

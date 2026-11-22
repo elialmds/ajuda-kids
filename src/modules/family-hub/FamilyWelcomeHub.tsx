@@ -11,7 +11,8 @@ import {
   Award,
   ChevronRight,
   Sun,
-  Moon
+  Moon,
+  Info
 } from 'lucide-react';
 import { useApp } from '@/modules/context/AppContext';
 import { ChildProfile } from '@/types';
@@ -27,12 +28,14 @@ interface FamilyWelcomeHubProps {
   onEnterChild: (child: ChildProfile) => void;
   onOpenParentDashboard: () => void;
   onOpenCreateChild: () => void;
+  onOpenAbout?: () => void;
 }
 
 export const FamilyWelcomeHub: React.FC<FamilyWelcomeHubProps> = ({
   onEnterChild,
   onOpenParentDashboard,
-  onOpenCreateChild
+  onOpenCreateChild,
+  onOpenAbout
 }) => {
   const {
     authSession,
@@ -87,6 +90,20 @@ export const FamilyWelcomeHub: React.FC<FamilyWelcomeHubProps> = ({
           />
 
           <div className="flex items-center gap-2">
+            {onOpenAbout && (
+              <button
+                type="button"
+                data-testid="welcome-about-button"
+                onClick={onOpenAbout}
+                title="Sobre o Ajuda KIDS"
+                aria-label="Sobre o Ajuda KIDS"
+                className="h-9 px-2.5 sm:px-3 rounded-2xl bg-white dark:bg-[#1E1B3A] text-[#25233A] dark:text-[#F8F7FF] border border-[#E4DFF5] dark:border-[#38316B] hover:bg-[#EFEAFC] dark:hover:bg-[#27234D] flex items-center gap-1.5 text-xs font-extrabold transition-colors"
+              >
+                <Info size={15} className="text-[#7047E8] dark:text-[#B5A0FF]" />
+                <span className="hidden sm:inline">Sobre</span>
+              </button>
+            )}
+
             <button
               type="button"
               data-testid="welcome-theme-toggle"

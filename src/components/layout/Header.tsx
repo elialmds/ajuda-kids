@@ -1,5 +1,5 @@
 import React from 'react';
-import { Lock, ShieldCheck, Volume2, VolumeX, Users, LogOut, Sun, Moon } from 'lucide-react';
+import { Lock, ShieldCheck, Volume2, VolumeX, Users, LogOut, Sun, Moon, Info } from 'lucide-react';
 import { useApp } from '@/modules/context/AppContext';
 import { getKidCharacter } from '@/data/charactersData';
 import { Button } from '@/components/common/Button';
@@ -10,13 +10,15 @@ interface HeaderProps {
   onNavigateToParent: () => void;
   onNavigateToChild: () => void;
   onOpenFamilyHub?: () => void;
+  onOpenAbout?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   currentView,
   onNavigateToParent,
   onNavigateToChild,
-  onOpenFamilyHub
+  onOpenFamilyHub,
+  onOpenAbout
 }) => {
   const {
     activeChild,
@@ -67,6 +69,20 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right Actions */}
         <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
+          {onOpenAbout && (
+            <button
+              type="button"
+              data-testid="header-about-button"
+              onClick={onOpenAbout}
+              title="Sobre o Ajuda KIDS"
+              aria-label="Sobre o Ajuda KIDS"
+              className="h-9 px-2.5 sm:px-3 rounded-2xl bg-[#F5F3FC] dark:bg-[#27234D] text-[#25233A] dark:text-[#F8F7FF] hover:bg-[#EFEAFC] dark:hover:bg-[#322D61] border border-[#E4DFF5] dark:border-[#38316B] flex items-center gap-1.5 text-xs font-extrabold transition-colors"
+            >
+              <Info size={15} className="text-[#7047E8] dark:text-[#B5A0FF]" />
+              <span className="hidden md:inline">Sobre</span>
+            </button>
+          )}
+
           {/* Light / Dark Theme Toggle */}
           <button
             type="button"
