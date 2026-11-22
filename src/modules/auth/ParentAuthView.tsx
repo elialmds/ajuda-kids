@@ -158,6 +158,7 @@ export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [unverifiedLoginEmail, setUnverifiedLoginEmail] = useState<string | null>(null);
+  const [duplicateEmailAlert, setDuplicateEmailAlert] = useState<string | null>(null);
 
   useEffect(() => {
     if (initialPairingCode) {
@@ -222,6 +223,7 @@ export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
     setErrorMsg(null);
     setSuccessMsg(null);
     setUnverifiedLoginEmail(null);
+    setDuplicateEmailAlert(null);
     if (nextMode === 'recover') {
       setRecoverStep(1);
       setRecoverCode('');
@@ -239,6 +241,7 @@ export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
     setErrorMsg(null);
     setSuccessMsg(null);
     setUnverifiedLoginEmail(null);
+    setDuplicateEmailAlert(null);
 
     if (!loginIdentifier.trim()) {
       setErrorMsg('Digite seu e-mail ou nome de usuário.');
@@ -273,6 +276,7 @@ export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+    setDuplicateEmailAlert(null);
 
     if (parentName.trim().length < 2) {
       setErrorMsg('Digite o nome completo do responsável.');
@@ -310,6 +314,9 @@ export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
         pin: parentPin
       });
       if (!res.success) {
+        if (res.code === 'DUPLICATE_EMAIL') {
+          setDuplicateEmailAlert(email.trim());
+        }
         setErrorMsg(res.error || 'Não foi possível iniciar a verificação do e-mail.');
         return;
       }
@@ -389,6 +396,7 @@ export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+    setDuplicateEmailAlert(null);
 
     const code = otpDigits.join('');
     if (!/^\d{6}$/.test(code)) {
@@ -400,6 +408,9 @@ export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
     try {
       const res = await confirmRegistrationVerification(email.trim(), code);
       if (!res.success) {
+        if (res.code === 'DUPLICATE_EMAIL') {
+          setDuplicateEmailAlert(email.trim());
+        }
         setErrorMsg(res.error || 'Código de verificação inválido.');
         return;
       }
@@ -704,6 +715,32 @@ export const ParentAuthView: React.FC<ParentAuthViewProps> = ({
                   >
                     Confirmar e-mail ({unverifiedLoginEmail}) no cadastro →
                   </button>
+                )}
+                {duplicateEmailAlert && mode === 'register' && (
+                  <div className="flex flex-wrap gap-3 ml-6 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetEmail = duplicateEmailAlert;
+                        switchMode('login');
+                        setLoginIdentifier(targetEmail);
+                      }}
+                      className="text-xs font-extrabold underline text-[#5843F4] dark:text-[#FF9900]"
+                    >
+                      Entrar com este e-mail →
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetEmail = duplicateEmailAlert;
+                        switchMode('recover');
+                        setRecoverIdentifier(targetEmail);
+                      }}
+                      className="text-xs font-extrabold underline text-[#9F1239] dark:text-[#FECDD3]"
+                    >
+                      Esqueci minha senha →
+                    </button>
+                  </div>
                 )}
               </div>
             )}

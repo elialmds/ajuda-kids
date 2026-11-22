@@ -16,6 +16,9 @@ create table if not exists public.family_accounts (
   updated_at timestamptz not null default now()
 );
 
+create unique index if not exists family_accounts_parent_email_lower_uidx
+  on public.family_accounts (lower(trim(parent_email)));
+
 -- 2. CHILD_PROFILE
 create table if not exists public.child_profiles (
   id text primary key,

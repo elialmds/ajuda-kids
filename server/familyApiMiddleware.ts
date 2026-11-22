@@ -106,6 +106,40 @@ function isValidEmailAddress(emailStr: string): boolean {
   );
 }
 
+function normalizeCanonicalEmail(emailStr: string): string {
+  const clean = String(emailStr || '').trim().toLowerCase();
+  const atIdx = clean.lastIndexOf('@');
+  if (atIdx <= 0) return clean;
+  let local = clean.slice(0, atIdx);
+  let domain = clean.slice(atIdx + 1);
+  if (domain === 'googlemail.com') domain = 'gmail.com';
+  if (domain === 'gmail.com') {
+    const plusIdx = local.indexOf('+');
+    if (plusIdx >= 0) local = local.slice(0, plusIdx);
+    local = local.replace(/\./g, '');
+  }
+  return `${local}@${domain}`;
+}
+
+function isSameEmailAddress(a: string, b: string): boolean {
+  const cleanA = String(a || '').trim().toLowerCase();
+  const cleanB = String(b || '').trim().toLowerCase();
+  if (!cleanA || !cleanB) return false;
+  if (cleanA === cleanB) return true;
+  return normalizeCanonicalEmail(cleanA) === normalizeCanonicalEmail(cleanB);
+}
+
+class StorageBackendError extends Error {
+  public readonly code = 'DATABASE_UNAVAILABLE';
+  constructor(message: string) {
+    super(message);
+    this.name = 'StorageBackendError';
+  }
+}
+
+const DUPLICATE_EMAIL_MESSAGE =
+  'Já existe uma conta cadastrada neste e-mail. Use a aba "Entrar" para acessar ou clique em "Esqueceu a senha?".';
+
 function validatePasswordStrengthServer(pwd: string): string | null {
   const raw = typeof pwd === 'string' ? pwd : '';
   const missing: string[] = [];
@@ -571,7 +605,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
     const supabase = getSupabaseConfig();
     if (supabase && typeof fetch !== 'undefined') {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const timeoutId = setTimeout(() => controller.abort(), 7000);
       try {
         const resp = await fetch(
           `${supabase.url}/rest/v1/ajuda_kids_state?id=eq.primary&select=data`,
@@ -600,9 +634,16 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
             ? 'Tabela public.ajuda_kids_state não encontrada no Supabase. Execute supabase/schema.sql no SQL Editor.'
             : `Erro HTTP ${resp.status} ao consultar o Supabase${errBody ? `: ${errBody}` : '.'}`;
         console.warn('[Ajuda KIDS Supabase]', lastStorageWarning);
+        // Fail-closed: never fall back to an empty/stale local store when Supabase is active,
+        // otherwise a subsequent write would overwrite existing families in Supabase.
+        throw new StorageBackendError(lastStorageWarning);
       } catch (e: any) {
+        if (e instanceof StorageBackendError) {
+          throw e;
+        }
         lastStorageWarning = `Falha de rede ao ler Supabase: ${String(e?.message || e)}`;
         console.warn('[Ajuda KIDS Supabase]', lastStorageWarning);
+        throw new StorageBackendError(lastStorageWarning);
       } finally {
         clearTimeout(timeoutId);
       }
@@ -656,7 +697,131 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
     return normalizeStoreData({});
   };
 
+  const postSupabaseTable = async (
+    supabase: { url: string; serviceKey: string },
+    table: string,
+    payload: unknown
+  ): Promise<Response> => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 7000);
+    try {
+      return await fetch(`${supabase.url}/rest/v1/${table}?on_conflict=id`, {
+        method: 'POST',
+        headers: buildSupabaseHeaders(supabase.serviceKey, {
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal'
+        }),
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
   const saveStore = async (store: ServerStore): Promise<void> => {
+    const supabase = getSupabaseConfig();
+    if (supabase && typeof fetch !== 'undefined') {
+      try {
+        const resp = await postSupabaseTable(supabase, 'ajuda_kids_state', {
+          id: 'primary',
+          data: store,
+          updated_at: new Date().toISOString()
+        });
+        if (!resp.ok) {
+          const errBody = (await resp.text().catch(() => '')).slice(0, 140).trim();
+          lastStorageWarning =
+            resp.status === 404
+              ? 'Tabela public.ajuda_kids_state não encontrada no Supabase. Execute supabase/schema.sql no SQL Editor.'
+              : `Erro HTTP ${resp.status} ao salvar no Supabase${errBody ? `: ${errBody}` : '.'}`;
+          console.error('[Ajuda KIDS Supabase]', lastStorageWarning);
+          throw new StorageBackendError(lastStorageWarning);
+        }
+
+        // Espelha também nas tabelas relacionais para visualização direta no Table Editor do Supabase
+        const familyEntries = Object.values(store.families || {}) as any[];
+        const dedupedFamilyByEmail = new Map<string, any>();
+        for (const f of familyEntries) {
+          if (!f?.familyAccount?.id || !f?.familyAccount?.parentName || f?.mergedIntoFamilyId) continue;
+          const acc = f.familyAccount;
+          const emailKey = normalizeCanonicalEmail(acc.parentEmail || acc.id);
+          const prev = dedupedFamilyByEmail.get(emailKey);
+          if (
+            !prev ||
+            new Date(acc.updatedAt || acc.createdAt || 0).getTime() >=
+              new Date(prev.updated_at || prev.created_at || 0).getTime()
+          ) {
+            dedupedFamilyByEmail.set(emailKey, {
+              id: String(acc.id),
+              parent_name: String(acc.parentName || '').trim() || 'Responsável',
+              parent_email: String(acc.parentEmail || '').trim(),
+              family_name: String(acc.familyName || 'Família Ajuda KIDS').trim(),
+              settings: {
+                maxDailyMinutes: acc.settings?.maxDailyMinutes ?? 30,
+                allowedTimeRange: acc.settings?.allowedTimeRange || { start: '08:00', end: '20:30' },
+                unlimitedGames: Boolean(acc.settings?.unlimitedGames),
+                themePreference: acc.settings?.themePreference || 'light'
+              },
+              created_at: acc.createdAt || new Date().toISOString(),
+              updated_at: acc.updatedAt || new Date().toISOString()
+            });
+          }
+        }
+        const familyRows = Array.from(dedupedFamilyByEmail.values());
+        if (familyRows.length > 0) {
+          const famResp = await postSupabaseTable(supabase, 'family_accounts', familyRows);
+          if (!famResp.ok) {
+            const errBody = (await famResp.text().catch(() => '')).slice(0, 140).trim();
+            lastStorageWarning = `Erro HTTP ${famResp.status} ao sincronizar family_accounts no Supabase${
+              errBody ? `: ${errBody}` : '.'
+            }`;
+            console.error('[Ajuda KIDS Supabase]', lastStorageWarning);
+            throw new StorageBackendError(lastStorageWarning);
+          }
+        }
+
+        const childRows = familyEntries.flatMap(f => {
+          const famId = String(f?.familyAccount?.id || '');
+          if (!famId || !Array.isArray(f?.children) || f?.mergedIntoFamilyId) return [];
+          return f.children
+            .filter((c: any) => c?.id && c?.name)
+            .map((c: any) => ({
+              id: String(c.id),
+              family_id: famId,
+              name: String(c.name || 'Criança'),
+              nickname: c.nickname ? String(c.nickname) : null,
+              age: Number(c.age) || 6,
+              birth_date: c.birthdate || null,
+              avatar: String(c.avatar || 'Lumi'),
+              companion_id: String(c.companionId || 'Lumi'),
+              age_group: ['4-6', '7-9', '10-12'].includes(c.ageGroup) ? c.ageGroup : '7-9',
+              learning_preferences: c.learningPreferences || {},
+              created_at: c.createdAt || new Date().toISOString(),
+              updated_at: c.updatedAt || new Date().toISOString()
+            }));
+        });
+        if (childRows.length > 0) {
+          const childResp = await postSupabaseTable(supabase, 'child_profiles', childRows);
+          if (!childResp.ok) {
+            const errBody = (await childResp.text().catch(() => '')).slice(0, 140).trim();
+            console.warn(
+              '[Ajuda KIDS Supabase]',
+              `Aviso HTTP ${childResp.status} ao sincronizar child_profiles${errBody ? `: ${errBody}` : '.'}`
+            );
+          }
+        }
+
+        lastStorageWarning = null;
+      } catch (e: any) {
+        if (e instanceof StorageBackendError) {
+          throw e;
+        }
+        lastStorageWarning = `Falha de rede ao salvar no Supabase: ${String(e?.message || e)}`;
+        console.error('[Ajuda KIDS Supabase]', lastStorageWarning);
+        throw new StorageBackendError(lastStorageWarning);
+      }
+    }
+
     if (useWarmServerlessCache) {
       (globalThis as any).__ajudaKidsWarmStore = store;
     }
@@ -676,109 +841,6 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         // ignore cleanup error
       }
       console.error('Error saving family sync store:', e);
-    }
-
-    const supabase = getSupabaseConfig();
-    if (supabase && typeof fetch !== 'undefined') {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
-      try {
-        const resp = await fetch(`${supabase.url}/rest/v1/ajuda_kids_state?on_conflict=id`, {
-          method: 'POST',
-          headers: buildSupabaseHeaders(supabase.serviceKey, {
-            'Content-Type': 'application/json',
-            Prefer: 'resolution=merge-duplicates,return=minimal'
-          }),
-          body: JSON.stringify({
-            id: 'primary',
-            data: store,
-            updated_at: new Date().toISOString()
-          }),
-          signal: controller.signal
-        });
-        if (resp.ok) {
-          lastStorageWarning = null;
-          // Espelha também nas tabelas relacionais para visualização direta no Table Editor do Supabase
-          try {
-            const familyEntries = Object.values(store.families || {}) as any[];
-            const familyRows = familyEntries
-              .filter(f => f?.familyAccount?.id && f?.familyAccount?.parentName)
-              .map(f => {
-                const acc = f.familyAccount;
-                return {
-                  id: String(acc.id),
-                  parent_name: String(acc.parentName || '').trim() || 'Responsável',
-                  parent_email: String(acc.parentEmail || '').trim(),
-                  family_name: String(acc.familyName || 'Família Ajuda KIDS').trim(),
-                  settings: {
-                    maxDailyMinutes: acc.settings?.maxDailyMinutes ?? 30,
-                    allowedTimeRange: acc.settings?.allowedTimeRange || { start: '08:00', end: '20:30' },
-                    unlimitedGames: Boolean(acc.settings?.unlimitedGames),
-                    themePreference: acc.settings?.themePreference || 'light'
-                  },
-                  created_at: acc.createdAt || new Date().toISOString(),
-                  updated_at: acc.updatedAt || new Date().toISOString()
-                };
-              });
-            if (familyRows.length > 0) {
-              await fetch(`${supabase.url}/rest/v1/family_accounts?on_conflict=id`, {
-                method: 'POST',
-                headers: buildSupabaseHeaders(supabase.serviceKey, {
-                  'Content-Type': 'application/json',
-                  Prefer: 'resolution=merge-duplicates,return=minimal'
-                }),
-                body: JSON.stringify(familyRows),
-                signal: controller.signal
-              });
-            }
-            const childRows = familyEntries.flatMap(f => {
-              const famId = String(f?.familyAccount?.id || '');
-              if (!famId || !Array.isArray(f?.children)) return [];
-              return f.children
-                .filter((c: any) => c?.id && c?.name)
-                .map((c: any) => ({
-                  id: String(c.id),
-                  family_id: famId,
-                  name: String(c.name || 'Criança'),
-                  nickname: c.nickname ? String(c.nickname) : null,
-                  age: Number(c.age) || 6,
-                  birth_date: c.birthdate || null,
-                  avatar: String(c.avatar || 'Lumi'),
-                  companion_id: String(c.companionId || 'Lumi'),
-                  age_group: ['4-6', '7-9', '10-12'].includes(c.ageGroup) ? c.ageGroup : '7-9',
-                  learning_preferences: c.learningPreferences || {},
-                  created_at: c.createdAt || new Date().toISOString(),
-                  updated_at: c.updatedAt || new Date().toISOString()
-                }));
-            });
-            if (childRows.length > 0) {
-              await fetch(`${supabase.url}/rest/v1/child_profiles?on_conflict=id`, {
-                method: 'POST',
-                headers: buildSupabaseHeaders(supabase.serviceKey, {
-                  'Content-Type': 'application/json',
-                  Prefer: 'resolution=merge-duplicates,return=minimal'
-                }),
-                body: JSON.stringify(childRows),
-                signal: controller.signal
-              });
-            }
-          } catch {
-            // Não bloqueia persistência principal em ajuda_kids_state
-          }
-        } else {
-          const errBody = (await resp.text().catch(() => '')).slice(0, 140).trim();
-          lastStorageWarning =
-            resp.status === 404
-              ? 'Tabela public.ajuda_kids_state não encontrada no Supabase. Execute supabase/schema.sql no SQL Editor.'
-              : `Erro HTTP ${resp.status} ao salvar no Supabase${errBody ? `: ${errBody}` : '.'}`;
-          console.error('[Ajuda KIDS Supabase]', lastStorageWarning);
-        }
-      } catch (e: any) {
-        lastStorageWarning = `Falha de rede ao salvar no Supabase: ${String(e?.message || e)}`;
-        console.error('[Ajuda KIDS Supabase]', lastStorageWarning);
-      } finally {
-        clearTimeout(timeoutId);
-      }
     }
 
     const kv = !options.dataDir ? getExternalKvConfig() : null;
@@ -865,15 +927,76 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
   const findUserByIdentifier = (users: Record<string, any>, identifier: string) => {
     const clean = String(identifier || '').trim().toLowerCase();
     if (!clean) return null;
-    return (
-      Object.values(users).find(
-        (u: any) =>
-          (u.emailLower && u.emailLower === clean) ||
-          (u.usernameLower && u.usernameLower === clean) ||
-          (u.email && String(u.email).trim().toLowerCase() === clean) ||
-          (u.username && String(u.username).trim().toLowerCase() === clean)
-      ) || null
+    const exact = Object.values(users).find(
+      (u: any) =>
+        (u.emailLower && u.emailLower === clean) ||
+        (u.usernameLower && u.usernameLower === clean) ||
+        (u.email && String(u.email).trim().toLowerCase() === clean) ||
+        (u.username && String(u.username).trim().toLowerCase() === clean)
     );
+    if (exact) return exact;
+    if (clean.includes('@')) {
+      return (
+        Object.values(users).find((u: any) =>
+          isSameEmailAddress(u?.emailLower || u?.email, clean)
+        ) || null
+      );
+    }
+    return null;
+  };
+
+  const findRegisteredEmailConflict = async (
+    store: ServerStore,
+    cleanEmail: string
+  ): Promise<{ conflict: boolean; pendingUser: any | null }> => {
+    const matchingUsers = Object.values(store.users || {}).filter((u: any) =>
+      isSameEmailAddress(u?.emailLower || u?.email, cleanEmail)
+    );
+    if (matchingUsers.some((u: any) => u?.emailVerified !== false)) {
+      return { conflict: true, pendingUser: null };
+    }
+
+    const matchingFamily = Object.values(store.families || {}).find(
+      (f: any) =>
+        f?.familyAccount?.parentEmail &&
+        isSameEmailAddress(f.familyAccount.parentEmail, cleanEmail)
+    );
+    if (matchingFamily) {
+      return { conflict: true, pendingUser: null };
+    }
+
+    const supabase = getSupabaseConfig();
+    if (supabase && typeof fetch !== 'undefined') {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      try {
+        const resp = await fetch(
+          `${supabase.url}/rest/v1/family_accounts?select=id,parent_email`,
+          {
+            headers: buildSupabaseHeaders(supabase.serviceKey, {
+              Accept: 'application/json'
+            }),
+            signal: controller.signal
+          }
+        );
+        if (resp.ok) {
+          const rows: any = await resp.json().catch(() => []);
+          if (
+            Array.isArray(rows) &&
+            rows.some((r: any) => r?.parent_email && isSameEmailAddress(r.parent_email, cleanEmail))
+          ) {
+            return { conflict: true, pendingUser: null };
+          }
+        }
+      } catch {
+        // Primary store already loaded from Supabase; ignore secondary table lookup timeout
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    const pendingUser = matchingUsers.find((u: any) => u?.emailVerified === false) || null;
+    return { conflict: false, pendingUser };
   };
 
   const mergeById = (a: any[] = [], b: any[] = [], limit = 300) => {
@@ -1080,7 +1203,11 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       const supabase = getSupabaseConfig();
       const kv = !options.dataDir ? getExternalKvConfig() : null;
       if (supabase) {
-        await loadStore();
+        try {
+          await loadStore();
+        } catch {
+          // storageWarning is populated on loadStore failure and reported in /api/health
+        }
       }
       return sendJson(req, res, 200, {
         ok: true,
@@ -1100,7 +1227,8 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       });
     }
 
-    const store = await loadStore();
+    try {
+      const store = await loadStore();
 
     const createVerifiedAccountAndSession = (pending: {
       parentName: string;
@@ -1224,18 +1352,24 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         });
       }
 
-      const existingEmailUser = Object.values(store.users).find((u: any) => u.emailLower === emailLower);
-      if (existingEmailUser && existingEmailUser.emailVerified === true) {
+      const { conflict: emailAlreadyRegistered, pendingUser: existingEmailUser } =
+        await findRegisteredEmailConflict(store, cleanEmail);
+      if (emailAlreadyRegistered) {
         return sendJson(req, res, 409, {
+          ok: false,
           code: 'DUPLICATE_EMAIL',
-          error: 'Este e-mail já está cadastrado e verificado em outra conta familiar.'
+          error: DUPLICATE_EMAIL_MESSAGE
         });
       }
 
       const now = Date.now();
       // Purge expired unverified accounts holding onto a username
       for (const [uid, candidate] of Object.entries(store.users)) {
-        if (candidate.emailVerified === false && candidate.emailLower !== emailLower && !isUserActiveOrPendingValid(store, candidate, now)) {
+        if (
+          candidate.emailVerified === false &&
+          !isSameEmailAddress(candidate.emailLower || candidate.email, cleanEmail) &&
+          !isUserActiveOrPendingValid(store, candidate, now)
+        ) {
           delete store.users[uid];
         }
       }
@@ -1243,18 +1377,22 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       const duplicateUser = Object.values(store.users).find(
         (u: any) =>
           u.usernameLower === cleanUser.toLowerCase() &&
-          u.emailLower !== emailLower &&
+          !isSameEmailAddress(u.emailLower || u.email, cleanEmail) &&
           isUserActiveOrPendingValid(store, u, now)
       );
       if (duplicateUser) {
         return sendJson(req, res, 409, {
+          ok: false,
           code: 'DUPLICATE_USERNAME',
           error: 'Este nome de usuário já está em uso. Escolha outro!'
         });
       }
 
       const verifications = (store.emailVerifications = store.emailVerifications || {});
-      const existing = verifications[emailLower];
+      const existingVerificationEntry = Object.entries(verifications).find(([key, val]: [string, any]) =>
+        isSameEmailAddress(val?.emailLower || val?.email || key, cleanEmail)
+      );
+      const existing = existingVerificationEntry?.[1];
       const COOLDOWN_MS = 30 * 1000;
       const WINDOW_MS = 15 * 60 * 1000;
 
@@ -1294,10 +1432,12 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       const nowIso = new Date().toISOString();
       const expiresAt = now + 10 * 60 * 1000;
 
-      if (existingEmailUser) {
+      if (existingEmailUser && existingEmailUser.emailVerified === false) {
         existingEmailUser.parentName = cleanName;
         existingEmailUser.username = cleanUser;
         existingEmailUser.usernameLower = cleanUser.toLowerCase();
+        existingEmailUser.email = cleanEmail;
+        existingEmailUser.emailLower = emailLower;
         existingEmailUser.passwordHash = passwordHash;
         existingEmailUser.passwordSalt = passwordSalt;
         existingEmailUser.emailVerified = false;
@@ -1451,21 +1591,22 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       }
 
       const pending = record.pendingRegistration;
-      const existingEmailUser = Object.values(store.users).find((u: any) => u.emailLower === emailLower);
-      if (existingEmailUser && existingEmailUser.emailVerified === true) {
+      const { conflict: emailConflictOnConfirm, pendingUser: existingEmailUser } =
+        await findRegisteredEmailConflict(store, cleanEmail);
+      if (emailConflictOnConfirm) {
         record.used = true;
         await saveStore(store);
         return sendJson(req, res, 409, {
           ok: false,
           code: 'DUPLICATE_EMAIL',
-          error: 'Este e-mail já está cadastrado e verificado em outra conta familiar.'
+          error: DUPLICATE_EMAIL_MESSAGE
         });
       }
 
       const duplicateUser = Object.values(store.users).find(
         (u: any) =>
           u.usernameLower === String(pending.username || '').trim().toLowerCase() &&
-          u.emailLower !== emailLower &&
+          !isSameEmailAddress(u.emailLower || u.email, cleanEmail) &&
           isUserActiveOrPendingValid(store, u)
       );
       if (duplicateUser) {
@@ -1482,7 +1623,7 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
       let session: any;
       let family: any;
 
-      if (existingEmailUser) {
+      if (existingEmailUser && existingEmailUser.emailVerified === false) {
         const nowIso = new Date().toISOString();
         existingEmailUser.parentName = String(pending.parentName || existingEmailUser.parentName).trim();
         existingEmailUser.username = String(pending.username || existingEmailUser.username).trim();
@@ -1575,17 +1716,20 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
         });
       }
 
-      const duplicateEmail = Object.values(store.users).find(
-        (u: any) => u.emailLower === emailLower && u.emailVerified === true
-      );
-      if (duplicateEmail) {
-        return sendJson(req, res, 409, { error: 'Este e-mail já está cadastrado em outra conta familiar.' });
+      const { conflict: emailConflictOnLegacyRegister } =
+        await findRegisteredEmailConflict(store, cleanEmail);
+      if (emailConflictOnLegacyRegister) {
+        return sendJson(req, res, 409, {
+          ok: false,
+          code: 'DUPLICATE_EMAIL',
+          error: DUPLICATE_EMAIL_MESSAGE
+        });
       }
 
       const duplicateUser = Object.values(store.users).find(
         (u: any) =>
           u.usernameLower === cleanUser.toLowerCase() &&
-          u.emailLower !== emailLower &&
+          !isSameEmailAddress(u.emailLower || u.email, cleanEmail) &&
           isUserActiveOrPendingValid(store, u)
       );
       if (duplicateUser) {
@@ -2808,6 +2952,16 @@ export function createFamilyApiHandler(options: FamilyApiOptions) {
     }
 
     return sendJson(req, res, 404, { error: 'API route not found' });
+    } catch (err) {
+      if (err instanceof StorageBackendError) {
+        return sendJson(req, res, 503, {
+          ok: false,
+          code: err.code,
+          error: 'Não foi possível conectar ao banco de dados agora. Tente novamente em instantes.'
+        });
+      }
+      throw err;
+    }
   };
 }
 

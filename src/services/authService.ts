@@ -164,6 +164,28 @@ function getLocalVault(): Record<string, LocalUserRecord> {
   }
 }
 
+function normalizeEmailForDuplicateCheck(emailStr: string): string {
+  const clean = String(emailStr || '').trim().toLowerCase();
+  const atIdx = clean.lastIndexOf('@');
+  if (atIdx <= 0) return clean;
+  let local = clean.slice(0, atIdx);
+  let domain = clean.slice(atIdx + 1);
+  if (domain === 'googlemail.com') domain = 'gmail.com';
+  if (domain === 'gmail.com') {
+    const plusIdx = local.indexOf('+');
+    if (plusIdx >= 0) local = local.slice(0, plusIdx);
+    local = local.replace(/\./g, '');
+  }
+  return `${local}@${domain}`;
+}
+
+function isSameEmailForClient(a: string, b: string): boolean {
+  const cleanA = String(a || '').trim().toLowerCase();
+  const cleanB = String(b || '').trim().toLowerCase();
+  if (!cleanA || !cleanB) return false;
+  return cleanA === cleanB || normalizeEmailForDuplicateCheck(cleanA) === normalizeEmailForDuplicateCheck(cleanB);
+}
+
 function saveLocalVault(vault: Record<string, LocalUserRecord>): void {
   if (typeof localStorage === 'undefined') return;
   localStorage.setItem(AUTH_LOCAL_VAULT_KEY, JSON.stringify(vault));
@@ -291,11 +313,14 @@ class AuthService {
           return {
             success: false,
             code:
-              resp.status === 409
+              data?.code ||
+              (resp.status === 409
                 ? String(data?.error || '').toLowerCase().includes('usuário')
                   ? 'DUPLICATE_USERNAME'
                   : 'DUPLICATE_EMAIL'
-                : data?.code || (resp.status >= 500 ? 'EMAIL_SEND_FAILED' : 'VALIDATION_ERROR'),
+                : resp.status >= 500
+                ? 'EMAIL_SEND_FAILED'
+                : 'VALIDATION_ERROR'),
             retryAfterSeconds: data?.retryAfterSeconds,
             error:
               data?.error ||
@@ -329,14 +354,15 @@ class AuthService {
     // In-memory offline / Vitest mode (never persists OTP codes to localStorage)
     const vault = getLocalVault();
     const duplicate = Object.values(vault).find(
-      u => u.emailLower === emailLower || u.usernameLower === cleanUsername.toLowerCase()
+      u => isSameEmailForClient(u.emailLower || u.email, cleanEmail) || u.usernameLower === cleanUsername.toLowerCase()
     );
     if (duplicate) {
-      return duplicate.emailLower === emailLower
+      return isSameEmailForClient(duplicate.emailLower || duplicate.email, cleanEmail)
         ? {
             success: false,
             code: 'DUPLICATE_EMAIL',
-            error: 'Este e-mail já está cadastrado em outra conta familiar.'
+            error:
+              'Já existe uma conta cadastrada neste e-mail. Use a aba "Entrar" para acessar ou clique em "Esqueceu a senha?".'
           }
         : {
             success: false,
@@ -577,15 +603,17 @@ class AuthService {
     // 2. Encrypted Local Vault Fallback (offline / test mode)
     const vault = getLocalVault();
     const duplicate = Object.values(vault).find(
-      u => u.emailLower === cleanEmail.toLowerCase() || u.usernameLower === cleanUsername.toLowerCase()
+      u => isSameEmailForClient(u.emailLower || u.email, cleanEmail) || u.usernameLower === cleanUsername.toLowerCase()
     );
     if (duplicate) {
       return {
         success: false,
-        error:
-          duplicate.emailLower === cleanEmail.toLowerCase()
-            ? 'Este e-mail já está cadastrado.'
-            : 'Este nome de usuário já está em uso.'
+        code: isSameEmailForClient(duplicate.emailLower || duplicate.email, cleanEmail)
+          ? 'DUPLICATE_EMAIL'
+          : 'DUPLICATE_USERNAME',
+        error: isSameEmailForClient(duplicate.emailLower || duplicate.email, cleanEmail)
+          ? 'Já existe uma conta cadastrada neste e-mail. Use a aba "Entrar" para acessar ou clique em "Esqueceu a senha?".'
+          : 'Este nome de usuário já está em uso.'
       };
     }
 

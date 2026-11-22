@@ -790,6 +790,23 @@ describe('Fase 1 — Estabilização: Segurança HTTP, Rate Limits, Pareamento e
       expect(confirmRes.data.ok).toBe(true);
       expect(Object.keys(savedRowData?.sessions || {}).length).toBeGreaterThan(0);
       expect(savedFamilyRows[0]?.parent_name).toBe('Pai Supabase');
+
+      // Tentar cadastrar novamente com o mesmo Gmail (inclusive variação de caixa/ponto/+alias)
+      // DEVE retornar 409 DUPLICATE_EMAIL sem enviar e-mail e sem sobrescrever a conta original.
+      const beforeOverwriteJson = JSON.stringify(savedRowData);
+      const dupSameEmail = await callSupa('/api/auth/request-email-verification', 'POST', {
+        parentName: 'Outro Nome Tentativa',
+        username: 'outro.usuario.dup',
+        email: 'PAI_SUPA+novo@Gmail.com',
+        password: 'Password@99',
+        passwordHash: 'h_supa_2',
+        passwordSalt: 's_supa_2',
+        settings: {}
+      });
+      expect(dupSameEmail.status).toBe(409);
+      expect(dupSameEmail.data.code).toBe('DUPLICATE_EMAIL');
+      expect(dupSameEmail.data.error).toContain('Já existe uma conta');
+      expect(JSON.stringify(savedRowData)).toBe(beforeOverwriteJson);
     } finally {
       globalThis.fetch = origFetch;
       if (origUrl === undefined) delete process.env.SUPABASE_URL;
@@ -799,6 +816,183 @@ describe('Fase 1 — Estabilização: Segurança HTTP, Rate Limits, Pareamento e
       if (origVercel === undefined) delete process.env.VERCEL;
       else process.env.VERCEL = origVercel;
       delete (globalThis as any).__ajudaKidsWarmStore;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('bloqueia sobreposição de conta no mesmo e-mail (incl. legado sem flag emailVerified) e falha fechado se leitura no Supabase falhar', async () => {
+    const mailCalls: any[] = [];
+    const legacySeed = {
+      users: {
+        usr_legacy: {
+          id: 'usr_legacy',
+          familyId: 'fam_legacy',
+          parentName: 'Conta Original',
+          username: 'original_user',
+          usernameLower: 'original_user',
+          email: 'dono.original@gmail.com',
+          emailLower: 'dono.original@gmail.com',
+          passwordHash: 'orig_hash',
+          passwordSalt: 'orig_salt',
+          createdAt: '2026-11-20T10:00:00.000Z'
+        }
+      },
+      sessions: {},
+      families: {
+        fam_legacy: {
+          familyAccount: {
+            id: 'fam_legacy',
+            parentUserId: 'usr_legacy',
+            parentName: 'Conta Original',
+            parentEmail: 'dono.original@gmail.com',
+            familyName: 'Família Original'
+          },
+          children: [],
+          devices: []
+        }
+      },
+      pairings: {}
+    };
+
+    const tempLocalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-dup-guard-'));
+    fs.writeFileSync(path.join(tempLocalDir, 'family_cloud_db.json'), JSON.stringify(legacySeed), 'utf8');
+
+    try {
+      const localHandler = createFamilyApiHandler({
+        rootDir: process.cwd(),
+        dataDir: tempLocalDir,
+        getSmtpEnv: () => ({
+          SMTP_HOST: 'smtp.gmail.com',
+          SMTP_PORT: 587,
+          SMTP_SECURE: false,
+          EMAIL_USER: 'guard@gmail.com',
+          EMAIL_PASS: 'guard-pass',
+          EMAIL_FROM: 'Ajuda KIDS <guard@gmail.com>'
+        }),
+        sendMailOverride: async (mail) => {
+          mailCalls.push(mail);
+          return { accepted: [mail.to], messageId: '<guard-should-not-send>' };
+        }
+      });
+
+      const dupReq = await new Promise<{ status: number; data: any }>((resolve) => {
+        const req = Object.assign(Readable.from([]), {
+          url: '/api/auth/request-email-verification',
+          method: 'POST',
+          headers: {},
+          body: {
+            parentName: 'Invasor',
+            username: 'outro_user',
+            email: 'donooriginal@gmail.com',
+            password: 'Password@99',
+            passwordHash: 'new_hash',
+            passwordSalt: 'new_salt',
+            settings: {}
+          },
+          socket: { remoteAddress: '127.0.0.1' }
+        }) as unknown as http.IncomingMessage;
+        let statusCode = 200;
+        const chunks: string[] = [];
+        const res = {
+          get statusCode() {
+            return statusCode;
+          },
+          set statusCode(val: number) {
+            statusCode = val;
+          },
+          setHeader() {},
+          end(chunk?: any) {
+            if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+            resolve({ status: statusCode, data: JSON.parse(chunks.join('') || '{}') });
+          }
+        } as unknown as http.ServerResponse;
+        Promise.resolve(localHandler(req, res, () => {})).catch(() => {});
+      });
+
+      expect(dupReq.status).toBe(409);
+      expect(dupReq.data.code).toBe('DUPLICATE_EMAIL');
+      expect(mailCalls.length).toBe(0);
+
+      const persisted = JSON.parse(fs.readFileSync(path.join(tempLocalDir, 'family_cloud_db.json'), 'utf8'));
+      expect(persisted.users.usr_legacy.passwordHash).toBe('orig_hash');
+      expect(persisted.users.usr_legacy.parentName).toBe('Conta Original');
+    } finally {
+      fs.rmSync(tempLocalDir, { recursive: true, force: true });
+    }
+
+    // Testa fail-closed quando leitura no Supabase retorna 500 (nunca pode cair no fallback vazio e sobrescrever dados)
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-supa-fail-'));
+    const origFetch = globalThis.fetch;
+    const origUrl = process.env.SUPABASE_URL;
+    const origKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    let postAttempted = false;
+
+    process.env.SUPABASE_URL = 'https://failclosed-ajuda.supabase.co';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'sb_secret_fail_test';
+
+    (globalThis as any).fetch = async (_url: string, init?: RequestInit) => {
+      if ((init?.method || 'GET').toUpperCase() === 'POST') {
+        postAttempted = true;
+      }
+      return new Response('Internal Supabase Error', { status: 500 });
+    };
+
+    try {
+      const failHandler = createFamilyApiHandler({
+        rootDir: tempRoot,
+        getSmtpEnv: () => ({
+          SMTP_HOST: 'smtp.gmail.com',
+          SMTP_PORT: 587,
+          SMTP_SECURE: false,
+          EMAIL_USER: 'fail@gmail.com',
+          EMAIL_PASS: 'fail-pass',
+          EMAIL_FROM: 'Ajuda KIDS <fail@gmail.com>'
+        })
+      });
+
+      const failRes = await new Promise<{ status: number; data: any }>((resolve) => {
+        const req = Object.assign(Readable.from([]), {
+          url: '/api/auth/request-email-verification',
+          method: 'POST',
+          headers: {},
+          body: {
+            parentName: 'Teste Fail',
+            username: 'teste_fail',
+            email: 'teste_fail@gmail.com',
+            password: 'Password@99',
+            passwordHash: 'h',
+            passwordSalt: 's',
+            settings: {}
+          },
+          socket: { remoteAddress: '127.0.0.1' }
+        }) as unknown as http.IncomingMessage;
+        let statusCode = 200;
+        const chunks: string[] = [];
+        const res = {
+          get statusCode() {
+            return statusCode;
+          },
+          set statusCode(val: number) {
+            statusCode = val;
+          },
+          setHeader() {},
+          end(chunk?: any) {
+            if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+            resolve({ status: statusCode, data: JSON.parse(chunks.join('') || '{}') });
+          }
+        } as unknown as http.ServerResponse;
+        Promise.resolve(failHandler(req, res, () => {})).catch(() => {});
+      });
+
+      expect(failRes.status).toBe(503);
+      expect(failRes.data.code).toBe('DATABASE_UNAVAILABLE');
+      expect(postAttempted).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = origUrl;
+      if (origKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+      else process.env.SUPABASE_SERVICE_ROLE_KEY = origKey;
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
